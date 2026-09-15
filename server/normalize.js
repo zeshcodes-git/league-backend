@@ -107,7 +107,7 @@ function teamSideTotals(side) {
 // whether the whole week's schedule has wrapped up.
 function isSideLocked(entries, gameStateByTeam) {
   const starters = (entries || []).filter((e) => isStarterSlot(e.lineupSlotId));
-  if (starters.length === 0) return true;
+  if (starters.length === 0) return false;
   return starters.every((e) => {
     const abbrev = PRO_TEAM_ABBREV[e.playerPoolEntry.player.proTeamId];
     const state = gameStateByTeam[abbrev];

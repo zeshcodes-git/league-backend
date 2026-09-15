@@ -88,9 +88,21 @@ export async function fetchFreeAgents() {
 /**
  * Real NFL scores/schedule. This is a public ESPN endpoint that needs no
  * league ID, season, or cookies — anyone can hit it.
+ *
+ * With no arguments, returns whatever ESPN considers the "current" week —
+ * good for the NFL Scores page. Pass week/seasonYear to force a specific
+ * week instead, which matters when we need to line this up exactly with
+ * the fantasy league's current scoring period rather than ESPN's own
+ * (sometimes momentarily out-of-sync) idea of "this week."
  */
-export async function fetchNflScoreboard() {
-  const res = await fetch("https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard");
+export async function fetchNflScoreboard(week, seasonYear) {
+  const params = new URLSearchParams();
+  if (week) params.set("week", week);
+  if (seasonYear) params.set("dates", seasonYear);
+  params.set("seasontype", "2"); // regular season
+  const qs = params.toString();
+  const url = `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard${week ? `?${qs}` : ""}`;
+  const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`NFL scoreboard request failed: ${res.status} ${res.statusText}`);
   }

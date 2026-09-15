@@ -90,7 +90,7 @@ async function refreshDashboard() {
   let gameStateByTeam = {};
   let weekStart = null;
   try {
-    const nflRaw = await fetchNflScoreboard();
+    const nflRaw = await fetchNflScoreboard(currentWeek, process.env.ESPN_SEASON);
     const events = nflRaw.events || [];
     events.forEach((ev) => {
       const comp = ev.competitions[0];
