@@ -100,6 +100,23 @@ async function refreshDashboard() {
   const currentWeek = teamsRaw.scoringPeriodId;
   const matchupRaw = await fetchLeague(["mMatchup", "mTeam"]);
 
+  // The mMatchup view doesn't include each player's full stats breakdown
+  // (including their pregame projection) — only mRoster does. Fetch it
+  // separately and build a quick lookup by player id.
+  let playerStatsById = {};
+  try {
+    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    (rosterRaw.teams || []).forEach((t) => {
+      (t.roster?.entries || []).forEach((e) => {
+        const p = e.playerPoolEntry.player;
+        playerStatsById[p.id] = p.stats;
+      });
+    });
+  } catch {
+    // If this fails, projections just fall back to actual-so-far — not
+    // ideal, but shouldn't break the whole dashboard.
+  }
+
   // ESPN's fantasy system can take hours after the last game ends to
   // officially mark matchups as decided (it waits out a stat-correction
   // window). We can figure out sooner, per matchup, whether it's actually
@@ -124,7 +141,7 @@ async function refreshDashboard() {
     // fantasy flag below — don't let it break the whole dashboard.
   }
 
-  const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam);
+  const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam, playerStatsById);
   const teams = normalizeTeams(teamsRaw);
 
   // ESPN's own team win-loss record lags behind the matchup winner flag by
@@ -235,7 +252,7 @@ app.get("/api/team/:espnTeamId/roster", async (req, res) => {
     const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
     const team = rosterRaw.teams.find((t) => String(t.id) === req.params.espnTeamId);
     if (!team) return res.status(404).json({ error: "No team with that ESPN team id" });
-    res.json({ roster: normalizeRoster(team) });
+    res.json({ roster: normalizeRoster(team, rosterRaw.scoringPeriodId) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

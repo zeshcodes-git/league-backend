@@ -13,9 +13,12 @@ const PRO_TEAM_ABBREV = {
 
 const DEFAULT_POSITION = { 1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST" };
 
+// ESPN lineup slot 20 = Bench, 21 = IR. Anything else is a starting slot.
 const BENCH_SLOTS = new Set([20, 21]);
 const isStarterSlot = (lineupSlotId) => !BENCH_SLOTS.has(lineupSlotId);
 
+// A small fixed color palette so every team gets a stable color across
+// reloads without needing ESPN to provide one.
 const COLOR_PALETTE = ["#3FA34D", "#4C8FE3", "#E3A73B", "#B564D4", "#FF6B4A", "#3FC1C9", "#E35D6A", "#8B97A3", "#F2B138", "#6B7FE3"];
 const colorForTeam = (espnTeamId) => COLOR_PALETTE[espnTeamId % COLOR_PALETTE.length];
 
@@ -49,12 +52,15 @@ export function normalizeTeams(rawTeamsData) {
   }));
 }
 
-function projectedTotal(player, fallback) {
-  const projectedEntry = (player.stats || []).find((s) => s.statSourceId === 1);
-  return projectedEntry ? projectedEntry.appliedTotal : fallback;
+// A player's stats array holds many entries (past weeks, season totals,
+// actual AND projected). We need the ONE entry that's specifically this
+// week's pregame projection, not just any statSourceId:1 entry.
+function projectedTotal(stats, currentWeek, fallback) {
+  const entry = (stats || []).find((s) => s.statSourceId === 1 && s.scoringPeriodId === currentWeek);
+  return entry ? entry.appliedTotal : fallback;
 }
 
-function playerFromEntry(entry) {
+function playerFromEntry(entry, currentWeek) {
   const p = entry.playerPoolEntry.player;
   const actual = entry.playerPoolEntry.appliedStatTotal || 0;
   return {
@@ -64,17 +70,20 @@ function playerFromEntry(entry) {
     nflTeam: PRO_TEAM_ABBREV[p.proTeamId] || "FA",
     starter: isStarterSlot(entry.lineupSlotId),
     weekPts: Math.round(actual * 10) / 10,
-    proj: Math.round(projectedTotal(p, actual) * 10) / 10,
+    proj: Math.round(projectedTotal(p.stats, currentWeek, actual) * 10) / 10,
     status: p.injuryStatus === "ACTIVE" ? "Healthy" : p.injuryStatus || "Healthy",
   };
 }
 
 // rawRosterTeam is one entry from the /mRoster teams[] array.
-export function normalizeRoster(rawRosterTeam) {
-  return (rawRosterTeam.roster?.entries || []).map(playerFromEntry);
+export function normalizeRoster(rawRosterTeam, currentWeek) {
+  return (rawRosterTeam.roster?.entries || []).map((e) => playerFromEntry(e, currentWeek));
 }
 
-function teamSideTotals(side, gameStateByTeam) {
+// playerStatsById maps a player's id to their full stats array, sourced
+// from the mRoster view — the mMatchup view (which this function otherwise
+// reads from) doesn't include enough detail to compute real projections.
+function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
   const entries = side.rosterForCurrentScoringPeriod?.entries || [];
   const starters = entries.filter((e) => isStarterSlot(e.lineupSlotId));
 
@@ -91,7 +100,8 @@ function teamSideTotals(side, gameStateByTeam) {
     const abbrev = PRO_TEAM_ABBREV[player.proTeamId];
     const state = gameStateByTeam ? gameStateByTeam[abbrev] : undefined;
     if (state === "post") return sum + actualPts;
-    return sum + projectedTotal(player, actualPts);
+    const fullStats = playerStatsById ? playerStatsById[player.id] : null;
+    return sum + projectedTotal(fullStats, currentWeek, actualPts);
   }, 0);
 
   const top = [...starters]
@@ -128,12 +138,12 @@ function isSideLocked(entries, gameStateByTeam) {
 // gameStateByTeam maps each real NFL team's abbreviation to its game state
 // this week ("pre" | "in" | "post"), used to figure out when a matchup is
 // truly locked in even before ESPN's own fantasy flag catches up.
-export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam = {}) {
+export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam = {}, playerStatsById = {}) {
   return rawMatchupData.schedule
     .filter((m) => m.matchupPeriodId === currentWeek)
     .map((m) => {
-      const home = teamSideTotals(m.home, gameStateByTeam);
-      const away = teamSideTotals(m.away, gameStateByTeam);
+      const home = teamSideTotals(m.home, gameStateByTeam, playerStatsById, currentWeek);
+      const away = teamSideTotals(m.away, gameStateByTeam, playerStatsById, currentWeek);
       const espnFinished = m.winner !== "UNDECIDED";
       const bothSidesLocked =
         isSideLocked(m.home.rosterForCurrentScoringPeriod?.entries, gameStateByTeam) &&
