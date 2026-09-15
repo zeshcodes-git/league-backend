@@ -1,0 +1,19 @@
+{
+  "name": "league-command-center-backend",
+  "version": "1.0.0",
+  "description": "Read-only backend that fetches your ESPN Fantasy Football league data and serves it to the League Command Center website.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
