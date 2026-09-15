@@ -13,12 +13,9 @@ const PRO_TEAM_ABBREV = {
 
 const DEFAULT_POSITION = { 1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST" };
 
-// ESPN lineup slot 20 = Bench, 21 = IR. Anything else is a starting slot.
 const BENCH_SLOTS = new Set([20, 21]);
 const isStarterSlot = (lineupSlotId) => !BENCH_SLOTS.has(lineupSlotId);
 
-// A small fixed color palette so every team gets a stable color across
-// reloads without needing ESPN to provide one.
 const COLOR_PALETTE = ["#3FA34D", "#4C8FE3", "#E3A73B", "#B564D4", "#FF6B4A", "#3FC1C9", "#E35D6A", "#8B97A3", "#F2B138", "#6B7FE3"];
 const colorForTeam = (espnTeamId) => COLOR_PALETTE[espnTeamId % COLOR_PALETTE.length];
 
@@ -77,14 +74,24 @@ export function normalizeRoster(rawRosterTeam) {
   return (rawRosterTeam.roster?.entries || []).map(playerFromEntry);
 }
 
-function teamSideTotals(side) {
+function teamSideTotals(side, gameStateByTeam) {
   const entries = side.rosterForCurrentScoringPeriod?.entries || [];
   const starters = entries.filter((e) => isStarterSlot(e.lineupSlotId));
 
   const actual = starters.reduce((sum, e) => sum + (e.playerPoolEntry.appliedStatTotal || 0), 0);
+
+  // "Projected" here means "best current estimate of the final score": for
+  // any starter whose real NFL game has already finished, their actual
+  // score is locked in and used instead of their (now-stale) pregame
+  // projection. This is what lets win probability move throughout the
+  // week instead of just comparing whatever's been scored so far.
   const projected = starters.reduce((sum, e) => {
+    const player = e.playerPoolEntry.player;
     const actualPts = e.playerPoolEntry.appliedStatTotal || 0;
-    return sum + projectedTotal(e.playerPoolEntry.player, actualPts);
+    const abbrev = PRO_TEAM_ABBREV[player.proTeamId];
+    const state = gameStateByTeam ? gameStateByTeam[abbrev] : undefined;
+    if (state === "post") return sum + actualPts;
+    return sum + projectedTotal(player, actualPts);
   }, 0);
 
   const top = [...starters]
@@ -125,8 +132,8 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
   return rawMatchupData.schedule
     .filter((m) => m.matchupPeriodId === currentWeek)
     .map((m) => {
-      const home = teamSideTotals(m.home);
-      const away = teamSideTotals(m.away);
+      const home = teamSideTotals(m.home, gameStateByTeam);
+      const away = teamSideTotals(m.away, gameStateByTeam);
       const espnFinished = m.winner !== "UNDECIDED";
       const bothSidesLocked =
         isSideLocked(m.home.rosterForCurrentScoringPeriod?.entries, gameStateByTeam) &&
@@ -137,8 +144,14 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
       // back to the real live/actual roster total instead of showing 0-0.
       const scoreA = finished && m.home.totalPoints > 0 ? m.home.totalPoints : home.actual;
       const scoreB = finished && m.away.totalPoints > 0 ? m.away.totalPoints : away.actual;
-      const total = scoreA + scoreB;
-      const winProbA = finished ? (scoreA >= scoreB ? 100 : 0) : total === 0 ? 50 : Math.round((scoreA / total) * 100);
+      // While the matchup is still live, base the odds on each team's
+      // current best-estimate final score (actual-so-far + projections for
+      // anyone who hasn't played yet) — not just whoever's ahead right now,
+      // which is meaningless before most players have even kicked off.
+      const projTotal = home.projected + away.projected;
+      const winProbA = finished
+        ? scoreA >= scoreB ? 100 : 0
+        : projTotal === 0 ? 50 : Math.round((home.projected / projTotal) * 100);
       return {
         id: `m${m.id}`,
         teamAId: `t${m.home.teamId}`,

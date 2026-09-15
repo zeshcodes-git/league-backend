@@ -73,6 +73,24 @@ const oddsSnapshots = [];
 // instead of every page load triggering its own ESPN calls.
 let latestDashboard = null;
 
+// Once a week is fully finished, we keep it here — this is what lets News
+// and the "hold" window below keep showing a completed week's real results
+// even after the fantasy schedule has already moved on to the next one.
+let lastCompletedWeekSnapshot = null; // { week, weekStart, teams, matchups }
+
+// True once it's Wednesday 12pm Pacific or later (or any day after
+// Wednesday) — the traditional "waiver Wednesday" cutoff. Before that,
+// we keep showing last week's finished results instead of jumping ahead
+// to the new week the moment ESPN advances its own scoring period.
+function isPastWednesdayNoonPacific() {
+  const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const day = pacificNow.getDay(); // 0=Sun ... 3=Wed ... 6=Sat
+  const hour = pacificNow.getHours();
+  if (day > 3) return true;
+  if (day < 3) return false;
+  return hour >= 12;
+}
+
 // Does the actual work: fetches fresh data from ESPN, figures out which
 // matchups are really decided, and records a snapshot. Called both by the
 // timer below (automatically, every few minutes) and by /api/dashboard
@@ -139,6 +157,8 @@ async function refreshDashboard() {
     }
   });
 
+  // Always record the TRUE current week's odds snapshots, regardless of
+  // any display hold below — Kalshi Odds should keep tracking real time.
   oddsSnapshots.push({
     time: Date.now(),
     week: currentWeek,
@@ -146,11 +166,41 @@ async function refreshDashboard() {
   });
   if (oddsSnapshots.length > 2000) oddsSnapshots.shift();
 
+  const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
+  if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
+    lastCompletedWeekSnapshot = { week: currentWeek, weekStart, teams, matchups };
+  }
+
+  // Hold the display on last week's fully-wrapped results until the
+  // following Wednesday at noon Pacific, so people have a couple of days
+  // to actually see and reflect on how the week turned out before the
+  // site moves on to the next one.
+  let displayWeek = currentWeek;
+  let displayWeekStart = weekStart;
+  let displayTeams = teams;
+  let displayMatchups = matchups;
+  if (
+    !isPastWednesdayNoonPacific() &&
+    lastCompletedWeekSnapshot &&
+    lastCompletedWeekSnapshot.week === currentWeek - 1
+  ) {
+    displayWeek = lastCompletedWeekSnapshot.week;
+    displayWeekStart = lastCompletedWeekSnapshot.weekStart;
+    displayTeams = lastCompletedWeekSnapshot.teams;
+    displayMatchups = lastCompletedWeekSnapshot.matchups;
+  }
+
   latestDashboard = {
-    currentWeek,
-    weekStart,
-    teams,
-    matchups,
+    currentWeek: displayWeek,
+    weekStart: displayWeekStart,
+    teams: displayTeams,
+    matchups: displayMatchups,
+    // Separate from the above — always available so the site can keep
+    // showing real News from the last completed week even once we've
+    // moved on to displaying a new, still-in-progress week.
+    lastCompletedWeek: lastCompletedWeekSnapshot
+      ? { week: lastCompletedWeekSnapshot.week, teams: lastCompletedWeekSnapshot.teams, matchups: lastCompletedWeekSnapshot.matchups }
+      : null,
   };
   return latestDashboard;
 }
