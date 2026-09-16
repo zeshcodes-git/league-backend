@@ -218,6 +218,13 @@ async function refreshDashboard() {
     lastCompletedWeek: lastCompletedWeekSnapshot
       ? { week: lastCompletedWeekSnapshot.week, teams: lastCompletedWeekSnapshot.teams, matchups: lastCompletedWeekSnapshot.matchups }
       : null,
+    // The TRUE current week/matchups, bypassing the display hold above.
+    // Kalshi Odds uses this instead — it should move on to the next
+    // week's odds as soon as that week is actually live, rather than
+    // waiting out the multi-day reflection window the rest of the site
+    // uses for standings/news.
+    liveWeek: currentWeek,
+    liveMatchups: matchups,
   };
   return latestDashboard;
 }
