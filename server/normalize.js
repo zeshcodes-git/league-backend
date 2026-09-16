@@ -19,7 +19,7 @@ const isStarterSlot = (lineupSlotId) => !BENCH_SLOTS.has(lineupSlotId);
 
 // A small fixed color palette so every team gets a stable color across
 // reloads without needing ESPN to provide one.
-const COLOR_PALETTE = ["#3FA34D", "#4C8FE3", "#E3A73B", "#B564D4", "#FF6B4A", "#3FC1C9", "#E35D6A", "#8B97A3", "#F2B138", "#6B7FE3"];
+const COLOR_PALETTE = ["#3FA34D", "#4C8FE3", "#E8963B", "#A85FD1", "#FF6B4A", "#2DBFC7", "#E85D8A", "#8B97A3", "#D4C43F", "#7B6BE0"];
 const colorForTeam = (espnTeamId) => COLOR_PALETTE[espnTeamId % COLOR_PALETTE.length];
 
 function ownerName(members, ownerIds) {
