@@ -9,6 +9,45 @@ const PORT = process.env.PORT || 3001;
 
 app.use(cors());
 
+// --- Persistent storage (Upstash) ---
+// Everything else in this file keeps its state in memory, which gets wiped
+// every time the server restarts (every deploy, or after 15 minutes of no
+// traffic on Render's free tier). These two helpers let us keep a few
+// important things — like "what happened last week" — around permanently,
+// by storing them in a free hosted Redis database instead. If Upstash isn't
+// configured, these just quietly do nothing rather than break the app.
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+async function kvGet(key) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const res = await fetch(UPSTASH_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["GET", key]),
+    });
+    const data = await res.json();
+    return data.result ? JSON.parse(data.result) : null;
+  } catch (err) {
+    console.warn("[kvGet] failed:", err.message);
+    return null;
+  }
+}
+
+async function kvSet(key, value) {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
+  try {
+    await fetch(UPSTASH_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["SET", key, JSON.stringify(value)]),
+    });
+  } catch (err) {
+    console.warn("[kvSet] failed:", err.message);
+  }
+}
+
 // Quick sanity check — hit this first to confirm the server itself is running,
 // with no ESPN call involved yet.
 app.get("/api/health", (req, res) => {
@@ -17,6 +56,7 @@ app.get("/api/health", (req, res) => {
     leagueIdConfigured: Boolean(process.env.ESPN_LEAGUE_ID),
     seasonConfigured: Boolean(process.env.ESPN_SEASON),
     privateLeagueCookiesConfigured: Boolean(process.env.ESPN_S2 && process.env.ESPN_SWID),
+    persistentStorageConfigured: Boolean(UPSTASH_URL && UPSTASH_TOKEN),
   });
 });
 
@@ -76,7 +116,7 @@ let latestDashboard = null;
 // Once a week is fully finished, we keep it here — this is what lets News
 // and the "hold" window below keep showing a completed week's real results
 // even after the fantasy schedule has already moved on to the next one.
-let lastCompletedWeekSnapshot = null; // { week, weekStart, teams, matchups }
+let lastCompletedWeekSnapshot = (await kvGet("lastCompletedWeek")) || null; // { week, weekStart, teams, matchups }
 
 // True once it's Wednesday 12pm Pacific or later (or any day after
 // Wednesday) — the traditional "waiver Wednesday" cutoff. Before that,
@@ -186,6 +226,7 @@ async function refreshDashboard() {
   const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
   if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
     lastCompletedWeekSnapshot = { week: currentWeek, weekStart, teams, matchups };
+    kvSet("lastCompletedWeek", lastCompletedWeekSnapshot);
   }
 
   // Hold the display on last week's fully-wrapped results until the
