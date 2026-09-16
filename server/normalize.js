@@ -80,6 +80,14 @@ export function normalizeRoster(rawRosterTeam, currentWeek) {
   return (rawRosterTeam.roster?.entries || []).map((e) => playerFromEntry(e, currentWeek));
 }
 
+// Rough rule of thumb: a fantasy player's actual score typically varies by
+// something like 35-45% of their projection from week to week. This isn't
+// derived from your league's real historical variance — it's a reasonable
+// stand-in so win probability behaves like a real probability (spreads
+// apart for lopsided projections, stays close for close ones) instead of
+// a flat ratio of two numbers.
+const PROJECTION_VOLATILITY = 0.4;
+
 // playerStatsById maps a player's id to their full stats array, sourced
 // from the mRoster view — the mMatchup view (which this function otherwise
 // reads from) doesn't include enough detail to compute real projections.
@@ -91,18 +99,27 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
 
   // "Projected" here means "best current estimate of the final score": for
   // any starter whose real NFL game has already finished, their actual
-  // score is locked in and used instead of their (now-stale) pregame
-  // projection. This is what lets win probability move throughout the
-  // week instead of just comparing whatever's been scored so far.
-  const projected = starters.reduce((sum, e) => {
+  // score is locked in (zero remaining uncertainty) and used instead of
+  // their now-stale pregame projection. Anyone still to play contributes
+  // their projection AND some real variance, which is what lets win
+  // probability behave like an actual probability instead of a ratio.
+  let projected = 0;
+  let variance = 0;
+  starters.forEach((e) => {
     const player = e.playerPoolEntry.player;
     const actualPts = e.playerPoolEntry.appliedStatTotal || 0;
     const abbrev = PRO_TEAM_ABBREV[player.proTeamId];
     const state = gameStateByTeam ? gameStateByTeam[abbrev] : undefined;
-    if (state === "post") return sum + actualPts;
+    if (state === "post") {
+      projected += actualPts; // locked in — no more uncertainty left
+      return;
+    }
     const fullStats = playerStatsById ? playerStatsById[player.id] : null;
-    return sum + projectedTotal(fullStats, currentWeek, actualPts);
-  }, 0);
+    const proj = projectedTotal(fullStats, currentWeek, actualPts);
+    projected += proj;
+    const sd = Math.max(proj, 0) * PROJECTION_VOLATILITY;
+    variance += sd * sd;
+  });
 
   const top = [...starters]
     .map((e) => ({
@@ -115,8 +132,26 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
   return {
     actual: Math.round(actual * 10) / 10,
     projected: Math.round(projected * 10) / 10,
+    variance,
     top: top || { name: "—", pos: "—", pts: 0 },
   };
+}
+
+// A fast, standard approximation of the normal distribution's CDF (accurate
+// to within about 1%) — good enough for an estimate like this without
+// needing a full statistics library.
+function normalCdfApprox(z) {
+  return 1 / (1 + Math.exp(-1.702 * z));
+}
+
+// Compares each team's likely-final-score distribution (mean ± real
+// uncertainty) instead of just their raw projected totals — this is what
+// makes win probability move sensibly with the size of the gap AND how
+// much of the game is left to play, not just whoever's ahead by a hair.
+function computeWinProbability(meanA, varA, meanB, varB) {
+  const sd = Math.sqrt(varA + varB) || 1;
+  const z = (meanA - meanB) / sd;
+  return Math.round(normalCdfApprox(z) * 100);
 }
 
 // A fantasy roster side is "locked" once none of its starters have a game
@@ -155,13 +190,11 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
       const scoreA = finished && m.home.totalPoints > 0 ? m.home.totalPoints : home.actual;
       const scoreB = finished && m.away.totalPoints > 0 ? m.away.totalPoints : away.actual;
       // While the matchup is still live, base the odds on each team's
-      // current best-estimate final score (actual-so-far + projections for
-      // anyone who hasn't played yet) — not just whoever's ahead right now,
-      // which is meaningless before most players have even kicked off.
-      const projTotal = home.projected + away.projected;
+      // likely-final-score distribution (mean and real uncertainty) rather
+      // than just a ratio of projections — see computeWinProbability above.
       const winProbA = finished
         ? scoreA >= scoreB ? 100 : 0
-        : projTotal === 0 ? 50 : Math.round((home.projected / projTotal) * 100);
+        : computeWinProbability(home.projected, home.variance, away.projected, away.variance);
       return {
         id: `m${m.id}`,
         teamAId: `t${m.home.teamId}`,

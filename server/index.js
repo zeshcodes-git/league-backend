@@ -106,7 +106,7 @@ app.get("/api/settings", async (req, res) => {
 // can chart how each matchup's odds move over time. Resets when the
 // server restarts — good enough for now; could be written to a file
 // later if you want it to survive restarts.
-const oddsSnapshots = [];
+let oddsSnapshots = (await kvGet("oddsSnapshots")) || [];
 
 // Cache of the last successfully computed dashboard, so /api/dashboard can
 // respond instantly from whatever the background timer last captured,
@@ -222,6 +222,7 @@ async function refreshDashboard() {
     matchups: matchups.map((m) => ({ id: m.id, winProbA: m.winProbA })),
   });
   if (oddsSnapshots.length > 2000) oddsSnapshots.shift();
+  await kvSet("oddsSnapshots", oddsSnapshots);
 
   const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
   if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
