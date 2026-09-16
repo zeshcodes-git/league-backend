@@ -60,6 +60,38 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+// TEMPORARY diagnostic — shows the raw response Upstash actually gives us,
+// so we can confirm whether our SET/GET calls are really working. Safe to
+// remove once persistence is confirmed working.
+app.get("/api/debug-kv", async (req, res) => {
+  try {
+    const setRes = await fetch(UPSTASH_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["SET", "debug-test", JSON.stringify({ hello: "world", time: Date.now() })]),
+    });
+    const setBody = await setRes.text();
+
+    const getRes = await fetch(UPSTASH_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["GET", "debug-test"]),
+    });
+    const getBody = await getRes.text();
+
+    res.json({
+      upstashUrlConfigured: Boolean(UPSTASH_URL),
+      upstashTokenConfigured: Boolean(UPSTASH_TOKEN),
+      setStatus: setRes.status,
+      setBody,
+      getStatus: getRes.status,
+      getBody,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Teams, owners, records.
 app.get("/api/teams", async (req, res) => {
   try {
