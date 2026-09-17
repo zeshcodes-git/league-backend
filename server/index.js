@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
-import { normalizeTeams, normalizeMatchups, normalizeRoster, normalizeFreeAgents, normalizeNflGames, computePositionalStrength } from "./normalize.js";
+import { normalizeTeams, normalizeMatchups, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -322,18 +322,6 @@ app.get("/api/free-agents", async (req, res) => {
   try {
     const raw = await fetchFreeAgents();
     res.json({ players: normalizeFreeAgents(raw) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Season-long fantasy production by position, for every team.
-app.get("/api/positional-strength", async (req, res) => {
-  try {
-    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
-    const teams = normalizeTeams(rosterRaw);
-    const byTeam = computePositionalStrength(rosterRaw);
-    res.json({ teams, byTeam });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
