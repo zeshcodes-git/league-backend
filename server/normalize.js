@@ -52,6 +52,29 @@ export function normalizeTeams(rawTeamsData) {
   }));
 }
 
+// Sums each rostered player's season-long fantasy total (under this
+// league's own scoring settings) by position, for every team. Honest
+// caveat: this reflects who a team currently HOLDS, not necessarily who
+// earned points while on that team's roster all season — a recent
+// pickup's whole-season total counts here, even if most of it happened
+// on waivers or another team.
+export function computePositionalStrength(rosterRaw) {
+  const byTeam = {};
+  (rosterRaw.teams || []).forEach((t) => {
+    const teamId = `t${t.id}`;
+    const byPos = {};
+    (t.roster?.entries || []).forEach((e) => {
+      const p = e.playerPoolEntry.player;
+      const pos = DEFAULT_POSITION[p.defaultPositionId] || "FLEX";
+      const seasonEntry = (p.stats || []).find((s) => s.scoringPeriodId === 0 && s.statSourceId === 0);
+      const seasonTotal = seasonEntry ? seasonEntry.appliedTotal : 0;
+      byPos[pos] = Math.round(((byPos[pos] || 0) + seasonTotal) * 10) / 10;
+    });
+    byTeam[teamId] = byPos;
+  });
+  return byTeam;
+}
+
 // A player's stats array holds many entries (past weeks, season totals,
 // actual AND projected). We need the ONE entry that's specifically this
 // week's pregame projection, not just any statSourceId:1 entry.

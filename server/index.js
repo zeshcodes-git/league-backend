@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
-import { normalizeTeams, normalizeMatchups, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
+import { normalizeTeams, normalizeMatchups, normalizeRoster, normalizeFreeAgents, normalizeNflGames, computePositionalStrength } from "./normalize.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -118,6 +118,12 @@ let latestDashboard = null;
 // even after the fantasy schedule has already moved on to the next one.
 let lastCompletedWeekSnapshot = (await kvGet("lastCompletedWeek")) || null; // { week, weekStart, teams, matchups }
 
+// A running log of EVERY completed week this season (not just the most
+// recent one) — this is what lets us compute season-long analytics like
+// Clutch Record, Consistency, All-Play Record, and a Championship Odds
+// trend, instead of only ever seeing the current or last week in isolation.
+let seasonHistory = (await kvGet("seasonHistory")) || []; // [{ week, teams, matchups }, ...]
+
 // True once it's Wednesday 12pm Pacific or later (or any day after
 // Wednesday) — the traditional "waiver Wednesday" cutoff. Before that,
 // we keep showing last week's finished results instead of jumping ahead
@@ -229,6 +235,10 @@ async function refreshDashboard() {
     lastCompletedWeekSnapshot = { week: currentWeek, weekStart, teams, matchups };
     kvSet("lastCompletedWeek", lastCompletedWeekSnapshot);
   }
+  if (weekComplete && !seasonHistory.some((w) => w.week === currentWeek)) {
+    seasonHistory = [...seasonHistory, { week: currentWeek, teams, matchups }].sort((x, y) => x.week - y.week);
+    kvSet("seasonHistory", seasonHistory);
+  }
 
   // Hold the display on last week's fully-wrapped results until the
   // following Wednesday at noon Pacific, so people have a couple of days
@@ -315,6 +325,24 @@ app.get("/api/free-agents", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Season-long fantasy production by position, for every team.
+app.get("/api/positional-strength", async (req, res) => {
+  try {
+    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    const teams = normalizeTeams(rosterRaw);
+    const byTeam = computePositionalStrength(rosterRaw);
+    res.json({ teams, byTeam });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Every completed week this season, in order — powers Clutch Record,
+// Consistency, All-Play Record, and the Championship Odds trend.
+app.get("/api/season-history", (req, res) => {
+  res.json({ history: seasonHistory });
 });
 
 // Real NFL scores and schedule — no league data involved, so this works
