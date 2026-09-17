@@ -281,15 +281,15 @@ async function refreshDashboard() {
   return latestDashboard;
 }
 
-// Capture a snapshot automatically every minute, all on its own — this is
-// what actually builds real odds history throughout game day, whether or
-// not anyone has the site open. Only starts once ESPN credentials are
+// Capture a snapshot automatically every 30 seconds, all on its own — this
+// is what actually builds real odds history throughout game day, whether
+// or not anyone has the site open. Only starts once ESPN credentials are
 // configured, so it doesn't spam errors while you're still setting up.
 if (process.env.ESPN_LEAGUE_ID && process.env.ESPN_SEASON) {
   refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
   setInterval(() => {
     refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
-  }, 60 * 1000);
+  }, 30 * 1000);
 }
 
 // Teams + this week's matchups, in the same shape the mock data used.
