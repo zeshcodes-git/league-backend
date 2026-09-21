@@ -15,6 +15,22 @@ const DEFAULT_POSITION = { 1: "QB", 2: "RB", 3: "WR", 4: "TE", 5: "K", 16: "DST"
 
 // ESPN lineup slot 20 = Bench, 21 = IR. Anything else is a starting slot.
 const BENCH_SLOTS = new Set([20, 21]);
+
+// ESPN's standard lineup slot ids — this is what tells us WHICH slot a
+// starter occupies (e.g., FLEX vs their own dedicated position), as
+// opposed to defaultPositionId, which is just the player's natural
+// position regardless of where they're actually slotted this week.
+const LINEUP_SLOT_LABEL = {
+  0: "QB",
+  2: "RB",
+  4: "WR",
+  6: "TE",
+  16: "DST",
+  17: "K",
+  23: "FLEX",
+  20: "BENCH",
+  21: "IR",
+};
 const isStarterSlot = (lineupSlotId) => !BENCH_SLOTS.has(lineupSlotId);
 
 // A small fixed color palette so every team gets a stable color across
@@ -81,6 +97,7 @@ function playerFromEntry(entry, currentWeek, gameStateByTeam) {
     pos: DEFAULT_POSITION[p.defaultPositionId] || "FLEX",
     nflTeam: PRO_TEAM_ABBREV[p.proTeamId] || "FA",
     starter: isStarterSlot(entry.lineupSlotId),
+    slot: LINEUP_SLOT_LABEL[entry.lineupSlotId] || "BENCH",
     weekPts: Math.round(weekActual * 10) / 10,
     proj: Math.round(projectedTotal(p.stats, currentWeek, weekActual) * 10) / 10,
     gameState,

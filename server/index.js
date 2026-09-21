@@ -359,6 +359,8 @@ function bestFreeAgentAt(pos, freeAgents, excludeIds) {
 // It compares your roster's real weekly projections against available free
 // agents, and flags byes/injuries first, then meaningful upgrades. Every
 // suggestion says exactly why, so it's easy to sanity-check by eye.
+const FLEX_ELIGIBLE_POSITIONS = new Set(["RB", "WR", "TE"]);
+
 function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
   const suggestions = [];
   const flaggedPlayerIds = new Set();
@@ -366,6 +368,7 @@ function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
 
   const starters = roster.filter((p) => p.starter);
   const bench = roster.filter((p) => !p.starter);
+  const flexStarter = starters.find((p) => p.slot === "FLEX");
 
   // Priority 1: a STARTER who's on a bye or clearly not playing this week —
   // this is the most urgent kind of move, since that roster spot is
@@ -378,6 +381,7 @@ function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
     if (!best) return;
     flaggedPlayerIds.add(p.id);
     usedFreeAgentIds.add(best.id);
+    const slotNote = p.slot === "FLEX" ? " (your FLEX spot)" : "";
     suggestions.push({
       priority: "high",
       dropName: p.name,
@@ -386,29 +390,47 @@ function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
       addName: best.name,
       addPos: best.pos,
       addProj: best.proj,
-      reason: `${p.name} is ${onBye ? "on a bye this week" : `listed as ${p.status}`} — ${best.name} is a healthy, available ${best.pos} projected for ${best.proj.toFixed(1)} points this week.`,
+      reason: `${p.name} is ${onBye ? "on a bye this week" : `listed as ${p.status}`}${slotNote} — ${best.name} is a healthy, available ${best.pos} projected for ${best.proj.toFixed(1)} points this week.`,
     });
   });
 
-  // Priority 2/3: anyone else (bench first, then starters) where a free
-  // agent projects meaningfully higher at the same position.
-  [...bench, ...starters].forEach((p) => {
-    if (flaggedPlayerIds.has(p.id)) return;
-    const best = bestFreeAgentAt(p.pos, freeAgents, usedFreeAgentIds);
+  // For each position, find the single WEAKEST roster spot that a free
+  // agent there could actually take over. For RB/WR/TE this deliberately
+  // includes your FLEX starter and dedicated starter at that position, not
+  // just same-position bench players — a strong pickup might be better
+  // used bumping a weak FLEX starter than sitting on the bench.
+  function weakestCandidateFor(pos) {
+    const candidates = bench.filter((p) => p.pos === pos && !flaggedPlayerIds.has(p.id));
+    const dedicatedStarter = starters.find((p) => p.slot === pos && !flaggedPlayerIds.has(p.id));
+    if (dedicatedStarter) candidates.push(dedicatedStarter);
+    if (FLEX_ELIGIBLE_POSITIONS.has(pos) && flexStarter && !flaggedPlayerIds.has(flexStarter.id)) {
+      candidates.push(flexStarter);
+    }
+    const seen = new Set();
+    const deduped = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
+    if (deduped.length === 0) return null;
+    return deduped.sort((a, b) => a.proj - b.proj)[0];
+  }
+
+  ["QB", "RB", "WR", "TE", "K", "DST"].forEach((pos) => {
+    const weakest = weakestCandidateFor(pos);
+    if (!weakest) return;
+    const best = bestFreeAgentAt(pos, freeAgents, usedFreeAgentIds);
     if (!best) return;
-    const gap = best.proj - p.proj;
+    const gap = best.proj - weakest.proj;
     if (gap < WAIVER_IMPROVEMENT_THRESHOLD) return;
-    flaggedPlayerIds.add(p.id);
+    flaggedPlayerIds.add(weakest.id);
     usedFreeAgentIds.add(best.id);
+    const slotNote = weakest.slot === "FLEX" ? " in your FLEX spot" : "";
     suggestions.push({
-      priority: p.starter ? "medium" : "low",
-      dropName: p.name,
-      dropPos: p.pos,
-      dropReason: `projected for just ${p.proj.toFixed(1)} points`,
+      priority: weakest.starter ? "medium" : "low",
+      dropName: weakest.name,
+      dropPos: weakest.pos,
+      dropReason: `projected for just ${weakest.proj.toFixed(1)} points${slotNote}`,
       addName: best.name,
       addPos: best.pos,
       addProj: best.proj,
-      reason: `${best.name} is projected for ${best.proj.toFixed(1)} points at ${best.pos} — about ${gap.toFixed(1)} more than ${p.name}'s ${p.proj.toFixed(1)}.`,
+      reason: `${best.name} is projected for ${best.proj.toFixed(1)} points at ${best.pos} — about ${gap.toFixed(1)} more than ${weakest.name}'s ${weakest.proj.toFixed(1)}${slotNote}.`,
     });
   });
 
