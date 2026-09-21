@@ -116,6 +116,10 @@ let latestDashboard = null;
 // the main refresh cycle) can mark which players have already started
 // their real NFL game.
 let cachedGameStateByTeam = {};
+// The full raw mRoster response from the main refresh cycle, shared with
+// the roster-detail and waiver-suggestions endpoints below instead of
+// each independently re-fetching the exact same data from ESPN.
+let cachedRosterRaw = null;
 
 // Once a week is fully finished, we keep it here — this is what lets News
 // and the "hold" window below keep showing a completed week's real results
@@ -156,6 +160,7 @@ async function refreshDashboard() {
   let playerStatsById = {};
   try {
     const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    cachedRosterRaw = rosterRaw;
     (rosterRaw.teams || []).forEach((t) => {
       (t.roster?.entries || []).forEach((e) => {
         const p = e.playerPoolEntry.player;
@@ -275,24 +280,31 @@ async function refreshDashboard() {
     displayMatchups = lastCompletedWeekSnapshot.matchups;
   }
 
+  // Only send lastCompletedWeek separately when it's ACTUALLY different
+  // from what's already in teams/matchups above — during the hold window,
+  // they're the exact same snapshot, so sending it twice under two keys
+  // would just double that part of the payload for no reason. Every
+  // frontend consumer already checks weekIsComplete() first (true during
+  // a hold), so it never actually needs this field in that case anyway.
+  const lastCompletedWeekForResponse =
+    lastCompletedWeekSnapshot && lastCompletedWeekSnapshot.week !== displayWeek
+      ? { week: lastCompletedWeekSnapshot.week, teams: lastCompletedWeekSnapshot.teams, matchups: lastCompletedWeekSnapshot.matchups }
+      : null;
+
+  // Same idea for liveMatchups/liveWeek — only meaningfully different from
+  // matchups/currentWeek while a hold is actually active. Most of the
+  // week there's no hold, so this avoids sending the whole matchups array
+  // twice; the frontend already falls back to matchups/currentWeek when
+  // these aren't present.
+  const holdActive = displayWeek !== currentWeek;
+
   latestDashboard = {
     currentWeek: displayWeek,
     weekStart: displayWeekStart,
     teams: displayTeams,
     matchups: displayMatchups,
-    // Separate from the above — always available so the site can keep
-    // showing real News from the last completed week even once we've
-    // moved on to displaying a new, still-in-progress week.
-    lastCompletedWeek: lastCompletedWeekSnapshot
-      ? { week: lastCompletedWeekSnapshot.week, teams: lastCompletedWeekSnapshot.teams, matchups: lastCompletedWeekSnapshot.matchups }
-      : null,
-    // The TRUE current week/matchups, bypassing the display hold above.
-    // Kalshi Odds uses this instead — it should move on to the next
-    // week's odds as soon as that week is actually live, rather than
-    // waiting out the multi-day reflection window the rest of the site
-    // uses for standings/news.
-    liveWeek: currentWeek,
-    liveMatchups: matchups,
+    lastCompletedWeek: lastCompletedWeekForResponse,
+    ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
   };
   return latestDashboard;
 }
@@ -324,7 +336,7 @@ app.get("/api/dashboard", async (req, res) => {
 // Full roster for one team, by its ESPN team id (the number, not "t1").
 app.get("/api/team/:espnTeamId/roster", async (req, res) => {
   try {
-    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    const rosterRaw = cachedRosterRaw || (await fetchLeague(["mRoster", "mTeam"]));
     const team = rosterRaw.teams.find((t) => String(t.id) === req.params.espnTeamId);
     if (!team) return res.status(404).json({ error: "No team with that ESPN team id" });
     res.json({ roster: normalizeRoster(team, rosterRaw.scoringPeriodId, cachedGameStateByTeam) });
@@ -334,9 +346,21 @@ app.get("/api/team/:espnTeamId/roster", async (req, res) => {
 });
 
 // Waiver-wire / free-agent players.
+let cachedFreeAgentsRaw = null;
+let freeAgentsCachedAt = 0;
+const FREE_AGENTS_CACHE_MS = 5 * 60 * 1000; // ownership % and outlooks don't change fast enough to justify fetching fresh every 30 seconds
+
+async function getFreeAgentsRaw() {
+  const now = Date.now();
+  if (cachedFreeAgentsRaw && now - freeAgentsCachedAt < FREE_AGENTS_CACHE_MS) return cachedFreeAgentsRaw;
+  cachedFreeAgentsRaw = await fetchFreeAgents();
+  freeAgentsCachedAt = now;
+  return cachedFreeAgentsRaw;
+}
+
 app.get("/api/free-agents", async (req, res) => {
   try {
-    const raw = await fetchFreeAgents();
+    const raw = await getFreeAgentsRaw();
     const currentWeek = latestDashboard ? latestDashboard.liveWeek : null;
     res.json({ players: normalizeFreeAgents(raw, currentWeek) });
   } catch (err) {
@@ -445,12 +469,12 @@ const MY_TEAM_ESPN_ID = 9; // Z Fleecer
 
 app.get("/api/my-team-suggestions", async (req, res) => {
   try {
-    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    const rosterRaw = cachedRosterRaw || (await fetchLeague(["mRoster", "mTeam"]));
     const currentWeek = rosterRaw.scoringPeriodId;
     const myTeamRaw = rosterRaw.teams.find((t) => t.id === MY_TEAM_ESPN_ID);
     if (!myTeamRaw) return res.status(404).json({ error: "Couldn't find that team." });
 
-    const [freeAgentsRaw, nflRaw] = await Promise.all([fetchFreeAgents(), fetchNflScoreboard()]);
+    const [freeAgentsRaw, nflRaw] = await Promise.all([getFreeAgentsRaw(), fetchNflScoreboard()]);
     const roster = normalizeRoster(myTeamRaw, currentWeek, cachedGameStateByTeam);
     const freeAgents = normalizeFreeAgents(freeAgentsRaw, currentWeek);
     const nflGames = normalizeNflGames(nflRaw);
