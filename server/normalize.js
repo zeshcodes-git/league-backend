@@ -116,6 +116,7 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
   // probability behave like an actual probability instead of a ratio.
   let projected = 0;
   let variance = 0;
+  const remainingPlayers = [];
   starters.forEach((e) => {
     const player = e.playerPoolEntry.player;
     const actualPts = e.playerPoolEntry.appliedStatTotal || 0;
@@ -130,6 +131,11 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
     projected += proj;
     const sd = Math.max(proj, 0) * PROJECTION_VOLATILITY;
     variance += sd * sd;
+    remainingPlayers.push({
+      name: player.fullName,
+      pos: DEFAULT_POSITION[player.defaultPositionId] || "FLEX",
+      proj: Math.round(proj * 10) / 10,
+    });
   });
 
   const top = [...starters]
@@ -144,6 +150,7 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
     actual: Math.round(actual * 10) / 10,
     projected: Math.round(projected * 10) / 10,
     variance,
+    remainingPlayers,
     top: top || { name: "—", pos: "—", pts: 0 },
   };
 }
@@ -214,6 +221,8 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
         scoreB,
         projA: home.projected,
         projB: away.projected,
+        remainingA: home.remainingPlayers,
+        remainingB: away.remainingPlayers,
         winProbA,
         espnDecided: espnFinished,
         topA: home.top,
