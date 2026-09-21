@@ -28,6 +28,7 @@ const LINEUP_SLOT_LABEL = {
   16: "DST",
   17: "K",
   23: "FLEX",
+  7: "OP", // Superflex/"Offensive Player" — some leagues allow QB here too
   20: "BENCH",
   21: "IR",
 };

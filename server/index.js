@@ -60,46 +60,6 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-// Teams, owners, records.
-app.get("/api/teams", async (req, res) => {
-  try {
-    const data = await fetchLeague(["mTeam", "mStandings"]);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Full rosters (players, positions, scores).
-app.get("/api/rosters", async (req, res) => {
-  try {
-    const data = await fetchLeague(["mRoster", "mTeam"]);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Weekly matchups and scores.
-app.get("/api/matchups", async (req, res) => {
-  try {
-    const data = await fetchLeague(["mMatchup", "mTeam"]);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// League settings (scoring rules, roster slots, playoff format).
-app.get("/api/settings", async (req, res) => {
-  try {
-    const data = await fetchLeague(["mSettings"]);
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // --- Clean, translated data for the website to actually use ---
 
 // In-memory history of win-probability snapshots, so the Kalshi Odds tab
