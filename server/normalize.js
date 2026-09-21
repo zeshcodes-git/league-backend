@@ -240,8 +240,6 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
         scoreB,
         projA: home.projected,
         projB: away.projected,
-        remainingA: home.remainingPlayers,
-        remainingB: away.remainingPlayers,
         winProbA,
         espnDecided: espnFinished,
         topA: home.top,
