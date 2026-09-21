@@ -65,15 +65,14 @@ function projectedTotal(stats, currentWeek, fallback) {
 // than just the requested week — so for "this week's actual points" we
 // pull the specific week's actual entry directly instead, the same
 // reliable way projectedTotal above does for projections.
-function actualTotal(stats, currentWeek, fallback) {
+function actualTotal(stats, currentWeek) {
   const entry = (stats || []).find((s) => s.statSourceId === 0 && s.scoringPeriodId === currentWeek);
-  return entry ? entry.appliedTotal : fallback;
+  return entry ? entry.appliedTotal : 0;
 }
 
 function playerFromEntry(entry, currentWeek) {
   const p = entry.playerPoolEntry.player;
-  const rawActual = entry.playerPoolEntry.appliedStatTotal || 0;
-  const weekActual = actualTotal(p.stats, currentWeek, rawActual);
+  const weekActual = actualTotal(p.stats, currentWeek);
   return {
     id: `p${p.id}`,
     name: p.fullName,
