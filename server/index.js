@@ -337,7 +337,105 @@ app.get("/api/team/:espnTeamId/roster", async (req, res) => {
 app.get("/api/free-agents", async (req, res) => {
   try {
     const raw = await fetchFreeAgents();
-    res.json({ players: normalizeFreeAgents(raw) });
+    const currentWeek = latestDashboard ? latestDashboard.liveWeek : null;
+    res.json({ players: normalizeFreeAgents(raw, currentWeek) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Our own reasonable cutoff for "worth making a move" — a free agent has
+// to project meaningfully higher than what you'd drop, not just marginally
+// better, or this would suggest constant tiny, not-worth-it swaps.
+const WAIVER_IMPROVEMENT_THRESHOLD = 3;
+
+function bestFreeAgentAt(pos, freeAgents, excludeIds) {
+  return [...freeAgents]
+    .filter((f) => f.pos === pos && f.proj != null && !excludeIds.has(f.id))
+    .sort((a, b) => b.proj - a.proj)[0];
+}
+
+// A transparent, rules-based recommendation engine — NOT a live LLM call.
+// It compares your roster's real weekly projections against available free
+// agents, and flags byes/injuries first, then meaningful upgrades. Every
+// suggestion says exactly why, so it's easy to sanity-check by eye.
+function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
+  const suggestions = [];
+  const flaggedPlayerIds = new Set();
+  const usedFreeAgentIds = new Set();
+
+  const starters = roster.filter((p) => p.starter);
+  const bench = roster.filter((p) => !p.starter);
+
+  // Priority 1: a STARTER who's on a bye or clearly not playing this week —
+  // this is the most urgent kind of move, since that roster spot is
+  // guaranteed to score 0 otherwise.
+  starters.forEach((p) => {
+    const onBye = !teamsPlayingThisWeek.has(p.nflTeam);
+    const isOut = /^(out|ir|doubtful|suspended)/i.test(p.status || "");
+    if (!onBye && !isOut) return;
+    const best = bestFreeAgentAt(p.pos, freeAgents, usedFreeAgentIds);
+    if (!best) return;
+    flaggedPlayerIds.add(p.id);
+    usedFreeAgentIds.add(best.id);
+    suggestions.push({
+      priority: "high",
+      dropName: p.name,
+      dropPos: p.pos,
+      dropReason: onBye ? "on a bye this week" : `listed as ${p.status}`,
+      addName: best.name,
+      addPos: best.pos,
+      addProj: best.proj,
+      reason: `${p.name} is ${onBye ? "on a bye this week" : `listed as ${p.status}`} — ${best.name} is a healthy, available ${best.pos} projected for ${best.proj.toFixed(1)} points this week.`,
+    });
+  });
+
+  // Priority 2/3: anyone else (bench first, then starters) where a free
+  // agent projects meaningfully higher at the same position.
+  [...bench, ...starters].forEach((p) => {
+    if (flaggedPlayerIds.has(p.id)) return;
+    const best = bestFreeAgentAt(p.pos, freeAgents, usedFreeAgentIds);
+    if (!best) return;
+    const gap = best.proj - p.proj;
+    if (gap < WAIVER_IMPROVEMENT_THRESHOLD) return;
+    flaggedPlayerIds.add(p.id);
+    usedFreeAgentIds.add(best.id);
+    suggestions.push({
+      priority: p.starter ? "medium" : "low",
+      dropName: p.name,
+      dropPos: p.pos,
+      dropReason: `projected for just ${p.proj.toFixed(1)} points`,
+      addName: best.name,
+      addPos: best.pos,
+      addProj: best.proj,
+      reason: `${best.name} is projected for ${best.proj.toFixed(1)} points at ${best.pos} — about ${gap.toFixed(1)} more than ${p.name}'s ${p.proj.toFixed(1)}.`,
+    });
+  });
+
+  const order = { high: 0, medium: 1, low: 2 };
+  return suggestions.sort((a, b) => order[a.priority] - order[b.priority]);
+}
+
+// This is a personal feature for one specific team in the league (per an
+// explicit request), not a general-purpose endpoint — hence the hardcoded
+// ESPN team id rather than a :espnTeamId route param.
+const MY_TEAM_ESPN_ID = 9; // Z Fleecer
+
+app.get("/api/my-team-suggestions", async (req, res) => {
+  try {
+    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    const currentWeek = rosterRaw.scoringPeriodId;
+    const myTeamRaw = rosterRaw.teams.find((t) => t.id === MY_TEAM_ESPN_ID);
+    if (!myTeamRaw) return res.status(404).json({ error: "Couldn't find that team." });
+
+    const [freeAgentsRaw, nflRaw] = await Promise.all([fetchFreeAgents(), fetchNflScoreboard()]);
+    const roster = normalizeRoster(myTeamRaw, currentWeek, cachedGameStateByTeam);
+    const freeAgents = normalizeFreeAgents(freeAgentsRaw, currentWeek);
+    const nflGames = normalizeNflGames(nflRaw);
+    const teamsPlayingThisWeek = new Set(nflGames.flatMap((g) => [g.home.abbrev, g.away.abbrev]));
+
+    const suggestions = computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek);
+    res.json({ teamName: myTeamRaw.name, currentWeek, suggestions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

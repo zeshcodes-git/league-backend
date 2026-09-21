@@ -238,7 +238,7 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
 // unrostered. We filter down to just the unclaimed ones (onTeamId is 0 or
 // missing means nobody's fantasy team owns them), then sort by ownership
 // percentage and cap the list at a reasonable size.
-export function normalizeFreeAgents(raw) {
+export function normalizeFreeAgents(raw, currentWeek) {
   const list = Array.isArray(raw) ? raw : raw.players || [];
   return list
     .filter((entry) => !entry.onTeamId || entry.onTeamId <= 0)
@@ -252,6 +252,8 @@ export function normalizeFreeAgents(raw) {
         percentOwned: p.ownership ? Math.round(p.ownership.percentOwned * 10) / 10 : null,
         percentChange: p.ownership ? Math.round(p.ownership.percentChange * 10) / 10 : null,
         outlook: p.seasonOutlook || null,
+        proj: currentWeek != null ? Math.round(projectedTotal(p.stats, currentWeek, 0) * 10) / 10 : null,
+        status: p.injuryStatus === "ACTIVE" ? "Healthy" : p.injuryStatus || "Healthy",
       };
     })
     .sort((a, b) => (b.percentOwned || 0) - (a.percentOwned || 0))
