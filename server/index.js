@@ -112,6 +112,10 @@ let oddsSnapshots = (await kvGet("oddsSnapshots")) || [];
 // respond instantly from whatever the background timer last captured,
 // instead of every page load triggering its own ESPN calls.
 let latestDashboard = null;
+// Cached separately so the standalone roster endpoint (which runs outside
+// the main refresh cycle) can mark which players have already started
+// their real NFL game.
+let cachedGameStateByTeam = {};
 
 // Once a week is fully finished, we keep it here — this is what lets News
 // and the "hold" window below keep showing a completed week's real results
@@ -186,6 +190,7 @@ async function refreshDashboard() {
     // If this lookup fails for any reason, just fall back to ESPN's own
     // fantasy flag below — don't let it break the whole dashboard.
   }
+  cachedGameStateByTeam = gameStateByTeam;
 
   const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam, playerStatsById);
   const teams = normalizeTeams(teamsRaw);
@@ -322,7 +327,7 @@ app.get("/api/team/:espnTeamId/roster", async (req, res) => {
     const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
     const team = rosterRaw.teams.find((t) => String(t.id) === req.params.espnTeamId);
     if (!team) return res.status(404).json({ error: "No team with that ESPN team id" });
-    res.json({ roster: normalizeRoster(team, rosterRaw.scoringPeriodId) });
+    res.json({ roster: normalizeRoster(team, rosterRaw.scoringPeriodId, cachedGameStateByTeam) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

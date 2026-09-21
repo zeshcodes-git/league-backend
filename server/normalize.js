@@ -70,9 +70,11 @@ function actualTotal(stats, currentWeek) {
   return entry ? entry.appliedTotal : 0;
 }
 
-function playerFromEntry(entry, currentWeek) {
+function playerFromEntry(entry, currentWeek, gameStateByTeam) {
   const p = entry.playerPoolEntry.player;
   const weekActual = actualTotal(p.stats, currentWeek);
+  const abbrev = PRO_TEAM_ABBREV[p.proTeamId];
+  const gameState = (gameStateByTeam && gameStateByTeam[abbrev]) || "pre"; // "pre" | "in" | "post"
   return {
     id: `p${p.id}`,
     name: p.fullName,
@@ -81,13 +83,14 @@ function playerFromEntry(entry, currentWeek) {
     starter: isStarterSlot(entry.lineupSlotId),
     weekPts: Math.round(weekActual * 10) / 10,
     proj: Math.round(projectedTotal(p.stats, currentWeek, weekActual) * 10) / 10,
+    gameState,
     status: p.injuryStatus === "ACTIVE" ? "Healthy" : p.injuryStatus || "Healthy",
   };
 }
 
 // rawRosterTeam is one entry from the /mRoster teams[] array.
-export function normalizeRoster(rawRosterTeam, currentWeek) {
-  return (rawRosterTeam.roster?.entries || []).map((e) => playerFromEntry(e, currentWeek));
+export function normalizeRoster(rawRosterTeam, currentWeek, gameStateByTeam) {
+  return (rawRosterTeam.roster?.entries || []).map((e) => playerFromEntry(e, currentWeek, gameStateByTeam));
 }
 
 // Rough rule of thumb: a fantasy player's actual score typically varies by
