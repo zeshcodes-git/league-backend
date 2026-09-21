@@ -60,17 +60,28 @@ function projectedTotal(stats, currentWeek, fallback) {
   return entry ? entry.appliedTotal : fallback;
 }
 
+// The top-level playerPoolEntry.appliedStatTotal field's exact scope isn't
+// clearly documented by ESPN, and appears to reflect season-to-date rather
+// than just the requested week — so for "this week's actual points" we
+// pull the specific week's actual entry directly instead, the same
+// reliable way projectedTotal above does for projections.
+function actualTotal(stats, currentWeek, fallback) {
+  const entry = (stats || []).find((s) => s.statSourceId === 0 && s.scoringPeriodId === currentWeek);
+  return entry ? entry.appliedTotal : fallback;
+}
+
 function playerFromEntry(entry, currentWeek) {
   const p = entry.playerPoolEntry.player;
-  const actual = entry.playerPoolEntry.appliedStatTotal || 0;
+  const rawActual = entry.playerPoolEntry.appliedStatTotal || 0;
+  const weekActual = actualTotal(p.stats, currentWeek, rawActual);
   return {
     id: `p${p.id}`,
     name: p.fullName,
     pos: DEFAULT_POSITION[p.defaultPositionId] || "FLEX",
     nflTeam: PRO_TEAM_ABBREV[p.proTeamId] || "FA",
     starter: isStarterSlot(entry.lineupSlotId),
-    weekPts: Math.round(actual * 10) / 10,
-    proj: Math.round(projectedTotal(p.stats, currentWeek, actual) * 10) / 10,
+    weekPts: Math.round(weekActual * 10) / 10,
+    proj: Math.round(projectedTotal(p.stats, currentWeek, weekActual) * 10) / 10,
     status: p.injuryStatus === "ACTIVE" ? "Healthy" : p.injuryStatus || "Healthy",
   };
 }
