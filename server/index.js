@@ -190,35 +190,47 @@ async function refreshDashboard() {
   const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam, playerStatsById);
   const teams = normalizeTeams(teamsRaw);
 
+  const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
+
   // ESPN's own team win-loss record lags behind the matchup winner flag by
-  // even more than the matchup flag lags behind the real games. So: for any
-  // matchup we've decided is finished ahead of ESPN's own official call,
-  // apply that result onto the team records ourselves. This is what makes
+  // even more than the matchup flag lags behind the real games. So: once
+  // EVERY matchup this week is actually decided, apply all those results
+  // onto the team records ourselves in one go. This is what makes
   // Standings, Power Rankings, Analytics, and Awards all update together
   // instead of just the matchup cards.
+  //
+  // Deliberately gated on the WHOLE week (weekComplete), not each matchup
+  // individually — otherwise teams whose game finishes early (Thursday
+  // night, say) would show an updated record while everyone else is still
+  // sitting on last week's, which looks inconsistent on Standings. Instead
+  // everyone's record stays frozen at last week's value until the entire
+  // week is decided, then updates all at once — which in a normal week
+  // lines up with Monday Night Football wrapping up.
   //
   // One honest limit: this can't reconstruct each team's win/loss STREAK,
   // since that needs the full sequence of past results, not just this
   // week's outcome — streaks will still reflect ESPN's own (slower) number
   // until ESPN's record catches up.
-  const teamById = (id) => teams.find((t) => t.id === id);
-  matchups.forEach((m) => {
-    if (!m.finished || m.espnDecided) return; // already reflected in ESPN's own record, or not actually over yet
-    const a = teamById(m.teamAId);
-    const b = teamById(m.teamBId);
-    if (!a || !b) return;
-    a.pointsFor = Math.round((a.pointsFor + m.scoreA) * 10) / 10;
-    a.pointsAgainst = Math.round((a.pointsAgainst + m.scoreB) * 10) / 10;
-    b.pointsFor = Math.round((b.pointsFor + m.scoreB) * 10) / 10;
-    b.pointsAgainst = Math.round((b.pointsAgainst + m.scoreA) * 10) / 10;
-    if (m.scoreA > m.scoreB) {
-      a.wins += 1;
-      b.losses += 1;
-    } else if (m.scoreB > m.scoreA) {
-      b.wins += 1;
-      a.losses += 1;
-    }
-  });
+  if (weekComplete) {
+    const teamById = (id) => teams.find((t) => t.id === id);
+    matchups.forEach((m) => {
+      if (m.espnDecided) return; // already reflected in ESPN's own record
+      const a = teamById(m.teamAId);
+      const b = teamById(m.teamBId);
+      if (!a || !b) return;
+      a.pointsFor = Math.round((a.pointsFor + m.scoreA) * 10) / 10;
+      a.pointsAgainst = Math.round((a.pointsAgainst + m.scoreB) * 10) / 10;
+      b.pointsFor = Math.round((b.pointsFor + m.scoreB) * 10) / 10;
+      b.pointsAgainst = Math.round((b.pointsAgainst + m.scoreA) * 10) / 10;
+      if (m.scoreA > m.scoreB) {
+        a.wins += 1;
+        b.losses += 1;
+      } else if (m.scoreB > m.scoreA) {
+        b.wins += 1;
+        a.losses += 1;
+      }
+    });
+  }
 
   // Always record the TRUE current week's odds snapshots, regardless of
   // any display hold below — Kalshi Odds should keep tracking real time.
@@ -230,7 +242,6 @@ async function refreshDashboard() {
   if (oddsSnapshots.length > 2000) oddsSnapshots.shift();
   await kvSet("oddsSnapshots", oddsSnapshots);
 
-  const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
   if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
     lastCompletedWeekSnapshot = { week: currentWeek, weekStart, teams, matchups };
     kvSet("lastCompletedWeek", lastCompletedWeekSnapshot);
