@@ -105,6 +105,54 @@ function isPastWednesdayNoonPacific() {
   return hour >= 12;
 }
 
+// The mMatchup view doesn't include each player's full stats breakdown
+// (including their pregame projection) — only mRoster does. That fetch is
+// by far the largest and most expensive one we make (full season-long
+// stats history for every rostered player), and player projections don't
+// meaningfully change minute to minute — so it's refreshed on its own,
+// much slower cadence instead of every time the live-score cycle runs.
+let cachedPlayerStatsById = {};
+let playerStatsCachedAt = 0;
+const PLAYER_STATS_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+
+async function refreshPlayerStatsIfStale() {
+  const now = Date.now();
+  if (cachedRosterRaw && now - playerStatsCachedAt < PLAYER_STATS_CACHE_MS) return;
+  try {
+    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
+    cachedRosterRaw = rosterRaw;
+    const fresh = {};
+    (rosterRaw.teams || []).forEach((t) => {
+      (t.roster?.entries || []).forEach((e) => {
+        const p = e.playerPoolEntry.player;
+        fresh[p.id] = p.stats;
+      });
+    });
+    cachedPlayerStatsById = fresh;
+    playerStatsCachedAt = now;
+  } catch (err) {
+    // If this fails, projections just fall back to whatever was cached
+    // before (or actual-so-far if nothing's cached yet) — not ideal, but
+    // shouldn't break the whole dashboard.
+    console.warn("[player stats refresh] failed:", err.message);
+  }
+}
+
+// The NFL scoreboard is requested by three different places (the main
+// refresh cycle, waiver suggestions, and the NFL Scores page) — shared
+// here with a short cache instead of each independently re-fetching it.
+let cachedNflByKey = {};
+const NFL_CACHE_MS = 60 * 1000;
+
+async function getNflScoreboard(week, seasonYear) {
+  const key = `${week || "default"}-${seasonYear || "default"}`;
+  const cached = cachedNflByKey[key];
+  if (cached && Date.now() - cached.at < NFL_CACHE_MS) return cached.data;
+  const data = await fetchNflScoreboard(week, seasonYear);
+  cachedNflByKey[key] = { data, at: Date.now() };
+  return data;
+}
+
 // Does the actual work: fetches fresh data from ESPN, figures out which
 // matchups are really decided, and records a snapshot. Called both by the
 // timer below (automatically, every few minutes) and by /api/dashboard
@@ -114,23 +162,8 @@ async function refreshDashboard() {
   const currentWeek = teamsRaw.scoringPeriodId;
   const matchupRaw = await fetchLeague(["mMatchup", "mTeam"]);
 
-  // The mMatchup view doesn't include each player's full stats breakdown
-  // (including their pregame projection) — only mRoster does. Fetch it
-  // separately and build a quick lookup by player id.
-  let playerStatsById = {};
-  try {
-    const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
-    cachedRosterRaw = rosterRaw;
-    (rosterRaw.teams || []).forEach((t) => {
-      (t.roster?.entries || []).forEach((e) => {
-        const p = e.playerPoolEntry.player;
-        playerStatsById[p.id] = p.stats;
-      });
-    });
-  } catch {
-    // If this fails, projections just fall back to actual-so-far — not
-    // ideal, but shouldn't break the whole dashboard.
-  }
+  await refreshPlayerStatsIfStale();
+  const playerStatsById = cachedPlayerStatsById;
 
   // ESPN's fantasy system can take hours after the last game ends to
   // officially mark matchups as decided (it waits out a stat-correction
@@ -140,7 +173,7 @@ async function refreshDashboard() {
   let gameStateByTeam = {};
   let weekStart = null;
   try {
-    const nflRaw = await fetchNflScoreboard(currentWeek, process.env.ESPN_SEASON);
+    const nflRaw = await getNflScoreboard(currentWeek, process.env.ESPN_SEASON);
     const events = nflRaw.events || [];
     events.forEach((ev) => {
       const comp = ev.competitions[0];
@@ -269,15 +302,19 @@ async function refreshDashboard() {
   return latestDashboard;
 }
 
-// Capture a snapshot automatically every 30 seconds, all on its own — this
+// Capture a snapshot automatically every 60 seconds, all on its own — this
 // is what actually builds real odds history throughout game day, whether
 // or not anyone has the site open. Only starts once ESPN credentials are
 // configured, so it doesn't spam errors while you're still setting up.
+//
+// This cycle itself is now cheap: the expensive full-roster fetch (by far
+// the largest one) runs on its own much slower 10-minute cache instead of
+// every cycle, so this interval mainly just keeps live scores current.
 if (process.env.ESPN_LEAGUE_ID && process.env.ESPN_SEASON) {
   refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
   setInterval(() => {
     refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
-  }, 30 * 1000);
+  }, 60 * 1000);
 }
 
 // Teams + this week's matchups, in the same shape the mock data used.
@@ -434,7 +471,7 @@ app.get("/api/my-team-suggestions", async (req, res) => {
     const myTeamRaw = rosterRaw.teams.find((t) => t.id === MY_TEAM_ESPN_ID);
     if (!myTeamRaw) return res.status(404).json({ error: "Couldn't find that team." });
 
-    const [freeAgentsRaw, nflRaw] = await Promise.all([getFreeAgentsRaw(), fetchNflScoreboard()]);
+    const [freeAgentsRaw, nflRaw] = await Promise.all([getFreeAgentsRaw(), getNflScoreboard()]);
     const roster = normalizeRoster(myTeamRaw, currentWeek, cachedGameStateByTeam);
     const freeAgents = normalizeFreeAgents(freeAgentsRaw, currentWeek);
     const nflGames = normalizeNflGames(nflRaw);
@@ -457,7 +494,7 @@ app.get("/api/season-history", (req, res) => {
 // even before your ESPN league credentials are set up.
 app.get("/api/nfl-scoreboard", async (req, res) => {
   try {
-    const raw = await fetchNflScoreboard();
+    const raw = await getNflScoreboard();
     res.json({ games: normalizeNflGames(raw) });
   } catch (err) {
     res.status(500).json({ error: err.message });
