@@ -92,6 +92,24 @@ let lastCompletedWeekSnapshot = (await kvGet("lastCompletedWeek")) || null; // {
 // trend, instead of only ever seeing the current or last week in isolation.
 let seasonHistory = (await kvGet("seasonHistory")) || []; // [{ week, teams, matchups }, ...]
 
+// Self-heal: an earlier bug could save a week as "complete" with every
+// matchup at 0-0 (the NFL schedule lookup came back empty). Drop any such
+// week so it can be recorded properly when the week actually finishes.
+const isBlankWeek = (w) => !w || !w.matchups || w.matchups.every((m) => !m.scoreA && !m.scoreB);
+{
+  const cleanedHistory = seasonHistory.filter((w) => !isBlankWeek(w));
+  if (cleanedHistory.length !== seasonHistory.length) {
+    seasonHistory = cleanedHistory;
+    await kvSet("seasonHistory", seasonHistory);
+    console.warn("[startup] removed blank week(s) from season history");
+  }
+  if (lastCompletedWeekSnapshot && isBlankWeek(lastCompletedWeekSnapshot)) {
+    lastCompletedWeekSnapshot = null;
+    await kvSet("lastCompletedWeek", null);
+    console.warn("[startup] removed blank last-completed-week snapshot");
+  }
+}
+
 // True once it's Wednesday 12pm Pacific or later (or any day after
 // Wednesday) — the traditional "waiver Wednesday" cutoff. Before that,
 // we keep showing last week's finished results instead of jumping ahead
@@ -210,7 +228,7 @@ async function refreshDashboard() {
   const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam, playerStatsById);
   const teams = normalizeTeams(teamsRaw);
 
-  const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished);
+  const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished) && !isBlankWeek({ matchups });
 
   // ESPN's own team win-loss record lags behind the matchup winner flag by
   // even more than the matchup flag lags behind the real games. So: once

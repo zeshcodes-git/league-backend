@@ -234,6 +234,10 @@ function computeWinProbability(meanA, varA, meanB, varB) {
 // left to play this week — that's what actually decides a matchup, not
 // whether the whole week's schedule has wrapped up.
 function isSideLocked(entries, gameStateByTeam) {
+  // If the NFL schedule lookup came back empty (failed fetch, schedule not
+  // published yet), "no game state" would read as "everyone is on a bye" and
+  // wrongly mark every matchup final at 0-0. No schedule info = not locked.
+  if (!gameStateByTeam || Object.keys(gameStateByTeam).length === 0) return false;
   const starters = (entries || []).filter((e) => isStarterSlot(e.lineupSlotId));
   if (starters.length === 0) return false;
   return starters.every((e) => {
@@ -259,7 +263,8 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
       const bothSidesLocked =
         isSideLocked(m.home.rosterForCurrentScoringPeriod?.entries, gameStateByTeam) &&
         isSideLocked(m.away.rosterForCurrentScoringPeriod?.entries, gameStateByTeam);
-      const finished = espnFinished || bothSidesLocked;
+      // A matchup with no points on either side hasn't been played, whatever the lock check says.
+      const finished = espnFinished || (bothSidesLocked && home.actual + away.actual > 0);
       // Prefer ESPN's official total once it's actually populated; if we're
       // calling it finished ahead of ESPN but their total is still 0, fall
       // back to the real live/actual roster total instead of showing 0-0.
