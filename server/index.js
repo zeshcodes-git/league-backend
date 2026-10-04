@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
+import { shouldRefreshNow, rosterCacheMs } from "./refreshPolicy.js";
 import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
 
 const app = express();
@@ -143,13 +144,16 @@ function isPastWednesdayNoonPacific() {
 // stats history for every rostered player), and player projections don't
 // meaningfully change minute to minute — so it's refreshed on its own,
 // much slower cadence instead of every time the live-score cycle runs.
+// What the last NFL schedule lookup said: is a game live, and when is the next kickoff?
+let liveInfo = null; // { anyLive, nextKickoffMs }
+let lastRefreshAt = 0;
 let cachedPlayerStatsById = {};
 let playerStatsCachedAt = 0;
-const PLAYER_STATS_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+// Reused for 10 minutes while games are live, an hour otherwise (see refreshPolicy.js).
 
 async function refreshPlayerStatsIfStale() {
   const now = Date.now();
-  if (cachedRosterRaw && now - playerStatsCachedAt < PLAYER_STATS_CACHE_MS) return;
+  if (cachedRosterRaw && now - playerStatsCachedAt < rosterCacheMs(liveInfo)) return;
   try {
     const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
     cachedRosterRaw = rosterRaw;
@@ -207,6 +211,7 @@ async function getLeagueInfo() {
 // timer below (automatically, every few minutes) and by /api/dashboard
 // directly (as a fallback if the timer hasn't run yet).
 async function refreshDashboard() {
+  lastRefreshAt = Date.now();
   const teamsRaw = await fetchLeague(["mTeam", "mStandings"]);
   const currentWeek = teamsRaw.scoringPeriodId;
   const matchupRaw = await fetchLeague(["mMatchup", "mTeam"]);
@@ -230,6 +235,11 @@ async function refreshDashboard() {
         gameStateByTeam[c.team.abbreviation] = comp.status.type.state; // "pre" | "in" | "post"
       });
     });
+    {
+      const states = events.map((ev) => ({ state: ev.competitions[0].status.type.state, at: new Date(ev.date).getTime() }));
+      const upcoming = states.filter((x) => x.state === "pre").map((x) => x.at);
+      liveInfo = { anyLive: states.some((x) => x.state === "in"), nextKickoffMs: upcoming.length ? Math.min(...upcoming) : null };
+    }
     if (events.length) {
       weekStart = events.reduce((earliest, ev) => (new Date(ev.date) < new Date(earliest) ? ev.date : earliest), events[0].date);
     }
@@ -409,9 +419,11 @@ async function refreshDashboard() {
 // every cycle, so this interval mainly just keeps live scores current.
 if (process.env.ESPN_LEAGUE_ID && process.env.ESPN_SEASON) {
   refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
+  // Ticks every 30s but only calls ESPN when refreshPolicy says it's worth it.
   setInterval(() => {
+    if (!shouldRefreshNow({ hasData: Boolean(latestDashboard), lastRefreshAt, info: liveInfo })) return;
     refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
-  }, 60 * 1000);
+  }, 30 * 1000);
 }
 
 // Teams + this week's matchups, in the same shape the mock data used.
