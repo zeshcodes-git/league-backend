@@ -119,6 +119,43 @@ export function normalizeRoster(rawRosterTeam, currentWeek, gameStateByTeam) {
 // a flat ratio of two numbers.
 const PROJECTION_VOLATILITY = 0.4;
 
+// Which lineup slots each natural position is allowed to fill.
+const POSITION_ELIGIBLE_SLOTS = {
+  1: [0, 7],
+  2: [2, 23, 7],
+  3: [4, 23, 7],
+  4: [6, 23, 7],
+  5: [17],
+  16: [16],
+};
+
+// The best score a roster COULD have had this week, using the same lineup
+// structure the team actually has (read from its own starting slots).
+// Dedicated slots are filled first, then FLEX, then Superflex/OP — which
+// gives the true optimum for standard ESPN lineups.
+function optimalTotal(entries) {
+  const slots = entries.filter((e) => isStarterSlot(e.lineupSlotId)).map((e) => e.lineupSlotId);
+  const order = (slot) => (slot === 7 ? 2 : slot === 23 ? 1 : 0);
+  slots.sort((a, b) => order(a) - order(b));
+  const pool = entries
+    .filter((e) => e.lineupSlotId !== 21) // IR players can't be started
+    .map((e) => ({
+      slots: POSITION_ELIGIBLE_SLOTS[e.playerPoolEntry.player.defaultPositionId] || [],
+      pts: e.playerPoolEntry.appliedStatTotal || 0,
+      used: false,
+    }))
+    .sort((a, b) => b.pts - a.pts);
+  let total = 0;
+  slots.forEach((slot) => {
+    const pick = pool.find((p) => !p.used && p.slots.includes(slot));
+    if (pick) {
+      pick.used = true;
+      total += pick.pts;
+    }
+  });
+  return total;
+}
+
 // playerStatsById maps a player's id to their full stats array, sourced
 // from the mRoster view — the mMatchup view (which this function otherwise
 // reads from) doesn't include enough detail to compute real projections.
@@ -168,6 +205,7 @@ function teamSideTotals(side, gameStateByTeam, playerStatsById, currentWeek) {
 
   return {
     actual: Math.round(actual * 10) / 10,
+    optimal: Math.round(Math.max(optimalTotal(entries), actual) * 10) / 10,
     projected: Math.round(projected * 10) / 10,
     variance,
     remainingPlayers,
@@ -241,6 +279,8 @@ export function normalizeMatchups(rawMatchupData, currentWeek, gameStateByTeam =
         scoreB,
         projA: home.projected,
         projB: away.projected,
+        optimalA: home.optimal,
+        optimalB: away.optimal,
         winProbA,
         espnDecided: espnFinished,
         topA: home.top,

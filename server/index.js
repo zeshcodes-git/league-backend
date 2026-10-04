@@ -153,6 +153,23 @@ async function getNflScoreboard(week, seasonYear) {
   return data;
 }
 
+// League structure (regular-season length, playoff size) never changes
+// mid-season, so it's fetched once and kept — used for playoff odds.
+let cachedLeagueInfo = null;
+async function getLeagueInfo() {
+  if (cachedLeagueInfo) return cachedLeagueInfo;
+  try {
+    const raw = await fetchLeague(["mSettings"]);
+    const sched = raw.settings?.scheduleSettings || {};
+    if (sched.matchupPeriodCount && sched.playoffTeamCount) {
+      cachedLeagueInfo = { regularSeasonWeeks: sched.matchupPeriodCount, playoffTeams: sched.playoffTeamCount };
+    }
+  } catch (err) {
+    console.warn("[league settings] failed:", err.message);
+  }
+  return cachedLeagueInfo;
+}
+
 // Does the actual work: fetches fresh data from ESPN, figures out which
 // matchups are really decided, and records a snapshot. Called both by the
 // timer below (automatically, every few minutes) and by /api/dashboard
@@ -237,13 +254,31 @@ async function refreshDashboard() {
 
   // Always record the TRUE current week's odds snapshots, regardless of
   // any display hold below — Kalshi Odds should keep tracking real time.
-  oddsSnapshots.push({
-    time: Date.now(),
-    week: currentWeek,
-    matchups: matchups.map((m) => ({ id: m.id, winProbA: m.winProbA })),
-  });
-  if (oddsSnapshots.length > 2000) oddsSnapshots.shift();
-  await kvSet("oddsSnapshots", oddsSnapshots);
+  // Only store a snapshot when something actually moved (or every 15 min as
+  // a heartbeat). Recording every minute filled the old 2,000-entry cap in
+  // ~33 hours, which is why the Odds chart only ever showed the last day and
+  // a half instead of the whole week. This also means far less data is
+  // written to storage and sent to the site.
+  const lastSnap = oddsSnapshots[oddsSnapshots.length - 1];
+  const oddsChanged =
+    !lastSnap ||
+    lastSnap.week !== currentWeek ||
+    Date.now() - lastSnap.time >= 15 * 60 * 1000 ||
+    matchups.some((m) => {
+      const prev = lastSnap.matchups.find((x) => x.id === m.id);
+      return !prev || prev.winProbA !== m.winProbA;
+    });
+  if (oddsChanged) {
+    oddsSnapshots.push({
+      time: Date.now(),
+      week: currentWeek,
+      matchups: matchups.map((m) => ({ id: m.id, winProbA: m.winProbA })),
+    });
+    // Keep the current and previous week only; the cap is just a safety net.
+    oddsSnapshots = oddsSnapshots.filter((x) => x.week >= currentWeek - 1);
+    if (oddsSnapshots.length > 6000) oddsSnapshots = oddsSnapshots.slice(-6000);
+    await kvSet("oddsSnapshots", oddsSnapshots);
+  }
 
   if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
     lastCompletedWeekSnapshot = { week: currentWeek, weekStart, teams, matchups };
@@ -297,6 +332,7 @@ async function refreshDashboard() {
     teams: displayTeams,
     matchups: displayMatchups,
     lastCompletedWeek: lastCompletedWeekForResponse,
+    league: await getLeagueInfo(),
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
   };
   return latestDashboard;
