@@ -115,3 +115,17 @@ so debugging together from the real error is the fastest path.
 Once you can see real data at those URLs, the next step is teaching the
 website to fetch from this server instead of using its built-in mock data.
 We'll do that page by page, the same way we built the mock version.
+
+## Optional settings and housekeeping
+
+These go in your `.env` locally and in the environment variables on Render.
+
+| Variable | What it does |
+| --- | --- |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Free hosted storage. Without it, odds history and season history reset whenever the server restarts. |
+| `MY_TEAM_ESPN_ID` | Which team the Waivers "Pickup Suggestions" page is for (defaults to `9`). |
+| `ESPN_SEASON` | The season year. Change it once a year; the site title follows it automatically. |
+
+**Keeping the odds chart fed.** Render's free tier sleeps after ~15 minutes without traffic, and a sleeping server can't record odds. `.github/workflows/keep-awake.yml` pings `/api/health` every 5 minutes (free on a public repo). Check it is running from the repo's **Actions** tab, and confirm tracking at `/api/health` — the `odds` section shows how many snapshots exist for the current week and when the last one was taken.
+
+**Things that update by themselves:** the full season history (rebuilt from ESPN's schedule), the playoff size and season length (from league settings), and the champion once ESPN finalizes a season.

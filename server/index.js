@@ -391,6 +391,7 @@ async function refreshDashboard() {
     lastCompletedWeek: lastCompletedWeekForResponse,
     league: await getLeagueInfo(),
     season: Number(process.env.ESPN_SEASON) || null,
+    myTeamEspnId: Number(process.env.MY_TEAM_ESPN_ID) || 9,
     // Set once ESPN assigns final ranks (season over) so the site can add the new champion by itself.
     champion: (() => { const t = (teamsRaw.teams || []).find((x) => x.rankFinal === 1); return t ? { season: Number(process.env.ESPN_SEASON) || null, espnTeamId: t.id } : null; })(),
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
@@ -558,7 +559,9 @@ function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
 // This is a personal feature for one specific team in the league (per an
 // explicit request), not a general-purpose endpoint — hence the hardcoded
 // ESPN team id rather than a :espnTeamId route param.
-const MY_TEAM_ESPN_ID = 9; // Z Fleecer
+// Which team the "Pickup Suggestions" page is for. Set MY_TEAM_ESPN_ID in the
+// environment to change it without touching code (defaults to team 9).
+const MY_TEAM_ESPN_ID = Number(process.env.MY_TEAM_ESPN_ID) || 9;
 
 app.get("/api/my-team-suggestions", async (req, res) => {
   try {
@@ -619,6 +622,11 @@ app.get("/api/odds-history", (req, res) => {
   });
   res.json({ history: byMatchup });
 });
+
+// A stray error in one background task should be logged, not take the whole
+// server down (and with it the odds history being recorded).
+process.on("unhandledRejection", (err) => console.warn("[unhandledRejection]", err && err.message ? err.message : err));
+process.on("uncaughtException", (err) => console.warn("[uncaughtException]", err && err.message ? err.message : err));
 
 app.listen(PORT, () => {
   console.log(`League Command Center backend running at http://localhost:${PORT}`);
