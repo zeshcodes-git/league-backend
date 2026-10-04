@@ -550,6 +550,13 @@ app.get("/api/odds-history", (req, res) => {
       byMatchup[m.id].push({ time: snap.time, winProbA: m.winProbA });
     });
   });
+  // The chart is a step line, so a point that repeats the previous value
+  // adds nothing. Collapse those runs (keeping the first and last point) —
+  // this took the response from hundreds of KB to a few KB.
+  Object.keys(byMatchup).forEach((id) => {
+    const pts = byMatchup[id];
+    byMatchup[id] = pts.filter((pt, i) => i === 0 || i === pts.length - 1 || pt.winProbA !== pts[i - 1].winProbA || pt.winProbA !== pts[i + 1].winProbA);
+  });
   res.json({ history: byMatchup });
 });
 
