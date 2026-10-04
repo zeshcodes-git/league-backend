@@ -36,8 +36,11 @@ const isStarterSlot = (lineupSlotId) => !BENCH_SLOTS.has(lineupSlotId);
 
 // A small fixed color palette so every team gets a stable color across
 // reloads without needing ESPN to provide one.
-const COLOR_PALETTE = ["#3FA34D", "#4C8FE3", "#E8963B", "#A85FD1", "#FF6B4A", "#2DBFC7", "#E85D8A", "#8B97A3", "#D4C43F", "#7B6BE0"];
-const colorForTeam = (espnTeamId) => COLOR_PALETTE[espnTeamId % COLOR_PALETTE.length];
+// Twelve clearly different hues (red, blue, gold, violet, green, orange, cyan,
+// pink, brown, slate, lime, indigo). Kept in sync with TEAM_COLORS in the frontend,
+// which is what the site actually uses to color teams.
+const COLOR_PALETTE = ["#E5484D", "#3B6FE8", "#E8B100", "#9B59D0", "#2FA462", "#F76B15", "#12B5CB", "#E5499B", "#A8714B", "#7C8798", "#84B800", "#5B4FD6"];
+const colorForTeam = (espnTeamId) => COLOR_PALETTE[(espnTeamId - 1 + COLOR_PALETTE.length) % COLOR_PALETTE.length];
 
 function ownerName(members, ownerIds) {
   const ownerId = Array.isArray(ownerIds) ? ownerIds[0] : ownerIds;
@@ -335,4 +338,59 @@ export function normalizeNflGames(raw) {
       away: { name: away.team.shortDisplayName || away.team.displayName, abbrev: away.team.abbreviation, score: away.score },
     };
   });
+}
+
+
+// Rebuilds every finished regular-season week from the full schedule ESPN
+// already sends us (past matchups carry their final scores). This is what
+// lets Analytics cover the WHOLE season — including weeks before this server
+// existed or while it was asleep — with no extra requests.
+export function buildCompletedWeeks(schedule, currentTeams, currentWeek) {
+  const byWeek = {};
+  (schedule || []).forEach((m) => {
+    if (m.matchupPeriodId >= currentWeek) return;
+    if (m.playoffTierType && m.playoffTierType !== "NONE") return;
+    if (!m.home || !m.away) return; // bye
+    (byWeek[m.matchupPeriodId] = byWeek[m.matchupPeriodId] || []).push(m);
+  });
+  const totals = {};
+  currentTeams.forEach((t) => { totals[t.id] = { wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, streak: 0 }; });
+  const weeks = [];
+  Object.keys(byWeek).map(Number).sort((a, b) => a - b).forEach((week) => {
+    const games = byWeek[week];
+    if (games.some((m) => m.winner === "UNDECIDED")) return; // not fully decided yet
+    const matchups = games.map((m) => {
+      const scoreA = Math.round((m.home.totalPoints || 0) * 10) / 10;
+      const scoreB = Math.round((m.away.totalPoints || 0) * 10) / 10;
+      const A = totals[`t${m.home.teamId}`];
+      const B = totals[`t${m.away.teamId}`];
+      if (A && B) {
+        A.pointsFor += scoreA; A.pointsAgainst += scoreB;
+        B.pointsFor += scoreB; B.pointsAgainst += scoreA;
+        const aWon = scoreA > scoreB;
+        const bWon = scoreB > scoreA;
+        if (aWon) { A.wins++; B.losses++; } else if (bWon) { B.wins++; A.losses++; }
+        A.streak = aWon ? Math.max(1, A.streak + 1) : bWon ? Math.min(-1, A.streak - 1) : 0;
+        B.streak = bWon ? Math.max(1, B.streak + 1) : aWon ? Math.min(-1, B.streak - 1) : 0;
+      }
+      return {
+        id: `m${m.id}`, teamAId: `t${m.home.teamId}`, teamBId: `t${m.away.teamId}`,
+        scoreA, scoreB, projA: scoreA, projB: scoreB, winProbA: scoreA >= scoreB ? 100 : 0,
+        espnDecided: true, topA: { name: "—", pos: "—", pts: 0 }, topB: { name: "—", pos: "—", pts: 0 }, finished: true,
+      };
+    });
+    if (matchups.every((m) => !m.scoreA && !m.scoreB)) return;
+    weeks.push({
+      week,
+      teams: currentTeams.map((t) => ({
+        ...t,
+        wins: totals[t.id].wins, losses: totals[t.id].losses,
+        pointsFor: Math.round(totals[t.id].pointsFor * 10) / 10,
+        pointsAgainst: Math.round(totals[t.id].pointsAgainst * 10) / 10,
+        streak: totals[t.id].streak,
+      })),
+      matchups,
+    });
+  });
+  return weeks;
 }

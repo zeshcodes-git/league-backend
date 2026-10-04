@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
-import { normalizeTeams, normalizeMatchups, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
+import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -228,6 +228,23 @@ async function refreshDashboard() {
   const matchups = normalizeMatchups(matchupRaw, currentWeek, gameStateByTeam, playerStatsById);
   const teams = normalizeTeams(teamsRaw);
 
+  // Rebuild every finished week from ESPN's own schedule (see
+  // buildCompletedWeeks). ESPN's final numbers include stat corrections, so
+  // they win over anything we saved earlier; weeks ESPN can't give us are kept.
+  // Done before this week's live adjustments below touch the team records.
+  {
+    const fromEspn = buildCompletedWeeks(matchupRaw.schedule, teams, currentWeek);
+    if (fromEspn.length) {
+      const byWeek = new Map(seasonHistory.map((w) => [w.week, w]));
+      fromEspn.forEach((w) => byWeek.set(w.week, w));
+      const merged = [...byWeek.values()].sort((x, y) => x.week - y.week);
+      if (JSON.stringify(merged) !== JSON.stringify(seasonHistory)) {
+        seasonHistory = merged;
+        await kvSet("seasonHistory", seasonHistory);
+      }
+    }
+  }
+
   const weekComplete = matchups.length > 0 && matchups.every((m) => m.finished) && !isBlankWeek({ matchups });
 
   // ESPN's own team win-loss record lags behind the matchup winner flag by
@@ -351,6 +368,9 @@ async function refreshDashboard() {
     matchups: displayMatchups,
     lastCompletedWeek: lastCompletedWeekForResponse,
     league: await getLeagueInfo(),
+    season: Number(process.env.ESPN_SEASON) || null,
+    // Set once ESPN assigns final ranks (season over) so the site can add the new champion by itself.
+    champion: (() => { const t = (teamsRaw.teams || []).find((x) => x.rankFinal === 1); return t ? { season: Number(process.env.ESPN_SEASON) || null, espnTeamId: t.id } : null; })(),
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
   };
   return latestDashboard;
