@@ -231,7 +231,8 @@ function normalCdfApprox(z) {
 function computeWinProbability(meanA, varA, meanB, varB) {
   const sd = Math.sqrt(varA + varB) || 1;
   const z = (meanA - meanB) / sd;
-  return Math.round(normalCdfApprox(z) * 100);
+  // A game that is still being played is never a certainty — keep it in 1-99.
+  return Math.min(99, Math.max(1, Math.round(normalCdfApprox(z) * 100)));
 }
 
 // A fantasy roster side is "locked" once none of its starters have a game
