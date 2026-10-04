@@ -57,6 +57,13 @@ app.get("/api/health", (req, res) => {
     seasonConfigured: Boolean(process.env.ESPN_SEASON),
     privateLeagueCookiesConfigured: Boolean(process.env.ESPN_S2 && process.env.ESPN_SWID),
     persistentStorageConfigured: Boolean(UPSTASH_URL && UPSTASH_TOKEN),
+    // Handy for checking the odds chart is being fed: should climb all week.
+    odds: {
+      snapshots: oddsSnapshots.length,
+      currentWeekSnapshots: oddsSnapshots.filter((x) => latestDashboard && x.week === (latestDashboard.liveWeek || latestDashboard.currentWeek)).length,
+      lastSnapshotAt: oddsSnapshots.length ? new Date(oddsSnapshots[oddsSnapshots.length - 1].time).toISOString() : null,
+    },
+    uptimeMinutes: Math.round(process.uptime() / 60),
   });
 });
 
@@ -66,7 +73,14 @@ app.get("/api/health", (req, res) => {
 // can chart how each matchup's odds move over time. Resets when the
 // server restarts — good enough for now; could be written to a file
 // later if you want it to survive restarts.
-let oddsSnapshots = (await kvGet("oddsSnapshots")) || [];
+// Drops snapshots that repeat the previous odds exactly (keeping each run's
+// first and last), which shrinks old per-minute data by ~99% and keeps the
+// stored list far below Upstash's per-request size limit.
+function compactSnapshots(list) {
+  const same = (a, b) => a.week === b.week && a.matchups.length === b.matchups.length && a.matchups.every((m, i) => b.matchups[i] && b.matchups[i].id === m.id && b.matchups[i].winProbA === m.winProbA);
+  return list.filter((snap, i) => i === 0 || i === list.length - 1 || !same(snap, list[i - 1]) || !same(snap, list[i + 1]));
+}
+let oddsSnapshots = compactSnapshots((await kvGet("oddsSnapshots")) || []);
 
 // Cache of the last successfully computed dashboard, so /api/dashboard can
 // respond instantly from whatever the background timer last captured,
@@ -283,6 +297,9 @@ async function refreshDashboard() {
       } else if (m.scoreB > m.scoreA) {
         b.wins += 1;
         a.losses += 1;
+      } else {
+        a.ties = (a.ties || 0) + 1;
+        b.ties = (b.ties || 0) + 1;
       }
     });
   }
@@ -295,14 +312,19 @@ async function refreshDashboard() {
   // a half instead of the whole week. This also means far less data is
   // written to storage and sent to the site.
   const lastSnap = oddsSnapshots[oddsSnapshots.length - 1];
+  // Before ESPN has published projections for a brand-new week every matchup
+  // computes to a meaningless 50/50, so wait until real odds exist — the chart
+  // then starts the moment the odds actually mean something.
+  const oddsAreMeaningful = matchups.some((m) => m.projA + m.projB > 0 || m.scoreA + m.scoreB > 0);
   const oddsChanged =
-    !lastSnap ||
+    oddsAreMeaningful &&
+    (!lastSnap ||
     lastSnap.week !== currentWeek ||
     Date.now() - lastSnap.time >= 15 * 60 * 1000 ||
     matchups.some((m) => {
       const prev = lastSnap.matchups.find((x) => x.id === m.id);
       return !prev || prev.winProbA !== m.winProbA;
-    });
+    }));
   if (oddsChanged) {
     oddsSnapshots.push({
       time: Date.now(),
@@ -311,7 +333,7 @@ async function refreshDashboard() {
     });
     // Keep the current and previous week only; the cap is just a safety net.
     oddsSnapshots = oddsSnapshots.filter((x) => x.week >= currentWeek - 1);
-    if (oddsSnapshots.length > 6000) oddsSnapshots = oddsSnapshots.slice(-6000);
+    if (oddsSnapshots.length > 3500) oddsSnapshots = oddsSnapshots.slice(-3500);
     await kvSet("oddsSnapshots", oddsSnapshots);
   }
 
@@ -470,7 +492,7 @@ function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
   // guaranteed to score 0 otherwise.
   starters.forEach((p) => {
     const onBye = !teamsPlayingThisWeek.has(p.nflTeam);
-    const isOut = /^(out|ir|doubtful|suspended)/i.test(p.status || "");
+    const isOut = /^(out|ir\b|injury[_ ]?reserve|doubtful|suspended|pup|nfi)/i.test(p.status || "");
     if (!onBye && !isOut) return;
     const best = bestFreeAgentAt(p.pos, freeAgents, usedFreeAgentIds);
     if (!best) return;

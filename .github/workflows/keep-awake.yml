@@ -1,12 +1,12 @@
 # Render's free tier puts the server to sleep after ~15 minutes with no
 # traffic, and a sleeping server can't record Kalshi Odds history. This pings
 # the lightweight /api/health endpoint (no ESPN call, tiny response) every
-# 10 minutes so the odds chart starts the moment each week's matchups are set.
+# 5 minutes so the odds chart starts the moment each week's matchups are set.
 name: Keep backend awake
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:

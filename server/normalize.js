@@ -66,6 +66,7 @@ export function normalizeTeams(rawTeamsData) {
     color: colorForTeam(t.id),
     wins: t.record.overall.wins,
     losses: t.record.overall.losses,
+    ties: t.record.overall.ties || 0,
     pointsFor: t.record.overall.pointsFor,
     pointsAgainst: t.record.overall.pointsAgainst,
     streak: streakValue(t.record),
@@ -354,7 +355,7 @@ export function buildCompletedWeeks(schedule, currentTeams, currentWeek) {
     (byWeek[m.matchupPeriodId] = byWeek[m.matchupPeriodId] || []).push(m);
   });
   const totals = {};
-  currentTeams.forEach((t) => { totals[t.id] = { wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, streak: 0 }; });
+  currentTeams.forEach((t) => { totals[t.id] = { wins: 0, losses: 0, ties: 0, pointsFor: 0, pointsAgainst: 0, streak: 0 }; });
   const weeks = [];
   Object.keys(byWeek).map(Number).sort((a, b) => a - b).forEach((week) => {
     const games = byWeek[week];
@@ -369,7 +370,7 @@ export function buildCompletedWeeks(schedule, currentTeams, currentWeek) {
         B.pointsFor += scoreB; B.pointsAgainst += scoreA;
         const aWon = scoreA > scoreB;
         const bWon = scoreB > scoreA;
-        if (aWon) { A.wins++; B.losses++; } else if (bWon) { B.wins++; A.losses++; }
+        if (aWon) { A.wins++; B.losses++; } else if (bWon) { B.wins++; A.losses++; } else { A.ties++; B.ties++; }
         A.streak = aWon ? Math.max(1, A.streak + 1) : bWon ? Math.min(-1, A.streak - 1) : 0;
         B.streak = bWon ? Math.max(1, B.streak + 1) : aWon ? Math.min(-1, B.streak - 1) : 0;
       }
@@ -384,7 +385,7 @@ export function buildCompletedWeeks(schedule, currentTeams, currentWeek) {
       week,
       teams: currentTeams.map((t) => ({
         ...t,
-        wins: totals[t.id].wins, losses: totals[t.id].losses,
+        wins: totals[t.id].wins, losses: totals[t.id].losses, ties: totals[t.id].ties,
         pointsFor: Math.round(totals[t.id].pointsFor * 10) / 10,
         pointsAgainst: Math.round(totals[t.id].pointsAgainst * 10) / 10,
         streak: totals[t.id].streak,
