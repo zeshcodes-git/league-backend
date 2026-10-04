@@ -1,10 +1,11 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
+import { fetchLeague, fetchFreeAgents, fetchNflScoreboard, fetchPlayersWeekly } from "./espnClient.js";
+import { createPlayerHistory } from "./playerHistory.js";
 import { shouldRefreshNow, rosterCacheMs } from "./refreshPolicy.js";
 import { buildSuggestions, DEFAULT_RULES } from "./suggestions.js";
-import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
+import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames, PRO_TEAM_ABBREV, projectedTotal } from "./normalize.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -65,6 +66,7 @@ app.get("/api/health", (req, res) => {
       currentWeekSnapshots: oddsSnapshots.filter((x) => latestDashboard && x.week === (latestDashboard.liveWeek || latestDashboard.currentWeek)).length,
       lastSnapshotAt: oddsSnapshots.length ? new Date(oddsSnapshots[oddsSnapshots.length - 1].time).toISOString() : null,
     },
+    playerHistory: playerHistory.stats(),
     uptimeMinutes: Math.round(process.uptime() / 60),
   });
 });
@@ -75,6 +77,10 @@ app.get("/api/health", (req, res) => {
 // can chart how each matchup's odds move over time. Resets when the
 // server restarts — good enough for now; could be written to a file
 // later if you want it to survive restarts.
+// Week-by-week points for every player this season (see playerHistory.js).
+const playerHistory = createPlayerHistory({ season: Number(process.env.ESPN_SEASON), kvGet, kvSet });
+await playerHistory.load();
+
 // Drops snapshots that repeat the previous odds exactly (keeping each run's
 // first and last), which shrinks old per-minute data by ~99% and keeps the
 // stored list far below Upstash's per-request size limit.
@@ -503,21 +509,70 @@ async function getRosterForAdvice() {
   return cachedRosterRaw || (await fetchLeague(["mRoster", "mTeam"]));
 }
 
+// Fetches week-by-week history for the players the advisor needs, one at a time
+// so two people opening it together don't trigger the same download twice.
+let historyQueue = Promise.resolve();
+function topUpPlayerHistory(playerIds, lastCompletedWeek) {
+  historyQueue = historyQueue.then(async () => {
+    const stale = playerHistory.needsRefresh([...new Set(playerIds)], lastCompletedWeek);
+    for (let i = 0; i < stale.length; i += 100) {
+      const chunk = stale.slice(i, i + 100);
+      try {
+        playerHistory.ingest(await fetchPlayersWeekly(chunk), lastCompletedWeek);
+      } catch (err) {
+        console.warn("[player history] fetch failed:", err.message); // advisor still works from what we have
+        break;
+      }
+    }
+    await playerHistory.save();
+  }).catch((err) => console.warn("[player history] failed:", err.message));
+  return historyQueue;
+}
+
 async function suggestionsForTeam(espnTeamId) {
   const rosterRaw = await getRosterForAdvice();
   const team = rosterRaw.teams.find((t) => t.id === espnTeamId);
   if (!team) return null;
+  const week = rosterRaw.scoringPeriodId;
   const [freeAgentsRaw, league] = await Promise.all([getFreeAgentsRaw(), getLeagueFull()]);
   // The same NFL game-state lookup the dashboard uses (cached for a minute).
-  if (!cachedGameStateByTeam || Object.keys(cachedGameStateByTeam).length === 0) await getNflScoreboard(rosterRaw.scoringPeriodId, process.env.ESPN_SEASON).catch(() => null);
+  if (!cachedGameStateByTeam || Object.keys(cachedGameStateByTeam).length === 0) await getNflScoreboard(week, process.env.ESPN_SEASON).catch(() => null);
   const list = Array.isArray(freeAgentsRaw) ? freeAgentsRaw : freeAgentsRaw.players || [];
   const unrostered = list.filter((e) => !e.onTeamId || e.onTeamId <= 0);
+
+  // This week's opponent (so decisions can be judged on win probability).
+  const matchups = latestDashboard ? latestDashboard.liveMatchups || latestDashboard.matchups : [];
+  const mine = matchups.find((m) => m.teamAId === `t${espnTeamId}` || m.teamBId === `t${espnTeamId}`);
+  const oppId = mine ? Number((mine.teamAId === `t${espnTeamId}` ? mine.teamBId : mine.teamAId).slice(1)) : null;
+  const opponentTeam = oppId != null ? rosterRaw.teams.find((t) => t.id === oppId) : null;
+
+  // Make sure we hold real week-by-week history for everyone who matters here.
+  const idsOf = (t) => (t.roster?.entries || []).map((e) => e.playerPoolEntry.player.id);
+  const topFas = unrostered
+    .map((e) => ({ id: e.player.id, proj: projectedTotal(e.player.stats, week, 0) }))
+    .filter((x) => x.proj > 0)
+    .sort((a, b) => b.proj - a.proj)
+    .slice(0, 120)
+    .map((x) => x.id);
+  await topUpPlayerHistory([...idsOf(team), ...(opponentTeam ? idsOf(opponentTeam) : []), ...topFas], week - 1);
+
+  // Remember ESPN's pregame projection for each player (once per week) for future comparisons.
+  [...(team.roster?.entries || []).map((e) => e.playerPoolEntry), ...unrostered].forEach((e) => {
+    const p = e.player;
+    const state = (cachedGameStateByTeam || {})[PRO_TEAM_ABBREV[p.proTeamId]];
+    if (!state || state === "pre") playerHistory.recordProjection(p.id, week, projectedTotal(p.stats, week, 0));
+  });
+  playerHistory.save().catch(() => {});
+
   return buildSuggestions({
     team,
     freeAgents: unrostered,
-    week: rosterRaw.scoringPeriodId,
+    week,
+    season: Number(process.env.ESPN_SEASON),
     gameStateByTeam: cachedGameStateByTeam || {},
     rules: league ? league.rules : DEFAULT_RULES,
+    history: (id) => playerHistory.get(id),
+    opponent: opponentTeam ? { team: opponentTeam } : null,
   });
 }
 
@@ -529,6 +584,13 @@ app.get("/api/team/:espnTeamId/suggestions", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// One player's tracked week-by-week points (handy for checking the tracker).
+app.get("/api/player-history/:playerId", (req, res) => {
+  const rec = playerHistory.get(Number(req.params.playerId));
+  if (!rec) return res.status(404).json({ error: "No history for that player yet — open a team's advisor first." });
+  res.json(rec);
 });
 
 // Older versions of the site asked for one fixed team; keep that working.

@@ -108,3 +108,29 @@ export async function fetchNflScoreboard(week, seasonYear) {
   }
   return res.json();
 }
+
+/**
+ * Week-by-week stats for specific players, by ESPN player id.
+ *
+ * ESPN's normal player data only carries last week's score plus season totals.
+ * Asking with a stats filter returns every week of this season (and ESPN's
+ * season-long expected pace), which is what the lineup advisor learns from.
+ * Small and rare: it is only called for players we haven't tracked yet, or once
+ * after each completed week.
+ */
+export async function fetchPlayersWeekly(ids) {
+  if (!ids.length) return [];
+  const filter = {
+    players: {
+      filterIds: { value: ids },
+      filterStatsForTopScoringPeriodIds: { value: 17, additionalValue: [`00${SEASON_ID}`, `10${SEASON_ID}`] },
+    },
+  };
+  const res = await fetch(`${BASE_URL}?view=kona_player_info`, { headers: { ...authHeaders(), "x-fantasy-filter": JSON.stringify(filter) } });
+  if (res.status === 401 || res.status === 403) throw new Error("ESPN rejected the player-history request (401/403).");
+  if (!res.ok) throw new Error(`ESPN API returned an error: ${res.status} ${res.statusText}`);
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) throw new Error("ESPN returned a webpage instead of player history.");
+  const data = await res.json();
+  return Array.isArray(data) ? data : data.players || [];
+}

@@ -14,7 +14,7 @@ const allPre = { ATL: "pre", BUF: "pre", CHI: "pre", CIN: "pre", CLE: "pre", DAL
 const RULES = { lineupSlotCounts: { 0: 1, 2: 2, 4: 2, 6: 1, 23: 2, 16: 1, 20: 7, 21: 1 }, positionLimits: { 1: 4, 2: 8, 3: 8, 4: 3, 5: 0, 16: 3 }, isBenchUnlimited: true };
 
 let uid = 0;
-const raw = ({ name, pos, slot, status, proj, actual = 0, team = 1, owned = 10, droppable = true }) => ({
+const raw = ({ name, pos, slot, status, proj, actual = 0, team = 1, owned = 10, droppable = true, weeks = null, pace = null }) => ({
   id: ++uid,
   fullName: name,
   defaultPositionId: pos,
@@ -23,7 +23,12 @@ const raw = ({ name, pos, slot, status, proj, actual = 0, team = 1, owned = 10, 
   eligibleSlots: [...ELIG[pos], 20, 21],
   ownership: { percentOwned: owned },
   droppable,
-  stats: [{ statSourceId: 1, scoringPeriodId: WEEK, appliedTotal: proj }, { statSourceId: 0, scoringPeriodId: WEEK, appliedTotal: actual }],
+  stats: [
+    { statSourceId: 1, scoringPeriodId: WEEK, appliedTotal: proj },
+    { statSourceId: 0, scoringPeriodId: WEEK, appliedTotal: actual },
+    ...(weeks ? Object.entries(weeks).map(([w, pts]) => ({ seasonId: 2026, statSourceId: 0, statSplitTypeId: 1, scoringPeriodId: Number(w), appliedTotal: pts })) : []),
+    ...(pace ? [{ seasonId: 2026, statSourceId: 1, statSplitTypeId: 0, scoringPeriodId: 0, appliedTotal: pace * 14, appliedAverage: pace }] : []),
+  ],
 });
 const rosterEntry = (o) => ({ lineupSlotId: o.slot, playerPoolEntry: { player: raw(o) } });
 const faEntry = (o) => ({ player: raw(o) });
@@ -46,7 +51,7 @@ const baseTeam = (overrides = []) => {
   const extra = overrides.filter((o) => !players.some((p) => p.name === o.name));
   return { name: "Test Team", roster: { entries: [...players, ...extra].map(rosterEntry) } };
 };
-const run = (team, fas = [], extra = {}) => buildSuggestions({ team, freeAgents: fas.map(faEntry), week: WEEK, gameStateByTeam: allPre, rules: RULES, ...extra });
+const run = (team, fas = [], extra = {}) => buildSuggestions({ team, freeAgents: fas.map(faEntry), week: WEEK, season: 2026, gameStateByTeam: allPre, rules: RULES, ...extra });
 
 /* ---- the optimizer ---- */
 test("bestLineup matches brute force on random cases", () => {
@@ -252,6 +257,162 @@ test("300 random rosters: every suggestion obeys the rules", () => {
     }
   }
   console.log("      covered:", JSON.stringify(covered));
+});
+
+/* ---- real season performance (form) changes the decisions ---- */
+test("a starter who has been scoring far below his projection is benched for a steadier bench player", () => {
+  const cold = { name: "RB1", pos: 2, slot: 2, proj: 14, weeks: { 1: 2, 2: 2, 3: 2 }, pace: 14 };
+  const steady = { name: "BenchRB", pos: 2, slot: 20, proj: 11.5, weeks: { 1: 12, 2: 12, 3: 12 }, pace: 11 };
+  const withForm = run(baseTeam([cold, steady, { name: "FLEX1", pos: 3, slot: 23, proj: 12 }, { name: "FLEX2", pos: 2, slot: 23, proj: 12 }]));
+  const swap = withForm.suggestions.find((x) => x.type === "lineup" && x.sit && x.sit.name === "RB1");
+  assert.ok(swap && swap.start.name === "BenchRB", "expected RB1 to be benched");
+  assert.match(swap.reason, /averaged/);
+  // ...and WITHOUT the season history, nothing would change (14 beats 11.5) — proving the history is what drove it
+  const noForm = run(baseTeam([{ ...cold, weeks: null, pace: null }, { ...steady, weeks: null, pace: null }, { name: "FLEX1", pos: 3, slot: 23, proj: 12 }, { name: "FLEX2", pos: 2, slot: 23, proj: 12 }]));
+  assert.ok(!noForm.suggestions.some((x) => x.type === "lineup" && x.sit && x.sit.name === "RB1"));
+});
+test("a hot free agent is suggested even though ESPN projects him below your starter", () => {
+  const hot = { name: "HotFA", pos: 3, proj: 8, weeks: { 1: 22, 2: 25, 3: 20 }, pace: 7 };
+  const r = run(baseTeam(), [hot]);
+  const s = r.suggestions.find((x) => x.type === "pickup");
+  assert.ok(s && s.add.name === "HotFA", "expected the hot free agent to be added");
+  assert.ok(s.add.exp > s.add.proj, "expected points should be above the raw projection");
+  assert.equal(run(baseTeam(), [{ ...hot, weeks: null, pace: null }]).suggestions.filter((x) => x.type === "pickup").length, 0);
+});
+test("a cold free agent is NOT suggested even though ESPN projects him above your starter", () => {
+  const cold = { name: "ColdFA", pos: 3, proj: 12.5, weeks: { 1: 2, 2: 2, 3: 2 }, pace: 12.5 };
+  assert.equal(run(baseTeam(), [cold]).suggestions.filter((x) => x.type === "pickup").length, 0);
+  assert.equal(run(baseTeam(), [{ ...cold, weeks: null, pace: null }]).suggestions.filter((x) => x.type === "pickup").length, 1);
+});
+test("when a drop is forced, the underperformer is the one cut", () => {
+  const extras = [
+    ...Array.from({ length: 4 }, (_, i) => ({ name: `FillWR${i}`, pos: 3, slot: 20, proj: 3 + i * 0.1, weeks: { 1: 3, 2: 3, 3: 3 }, pace: 3 })),
+    { name: "ColdBench", pos: 3, slot: 20, proj: 3, weeks: { 1: 0.5, 2: 0.4, 3: 0.3 }, pace: 3.2 },
+    { name: "SteadyBench", pos: 3, slot: 20, proj: 3, weeks: { 1: 6, 2: 6, 3: 6 }, pace: 3 },
+  ];
+  const r = run(baseTeam(extras), [{ name: "StarWR", pos: 3, proj: 18 }]);
+  const s = r.suggestions.find((x) => x.type === "pickup");
+  assert.ok(s && s.drop, "needs a drop at the WR limit");
+  assert.equal(s.drop.name, "ColdBench", `should cut the player who has been scoring far below expectations (cut ${s.drop.name})`);
+});
+test("each card shows the player's real weekly points", () => {
+  const r = run(baseTeam([{ name: "WR1", pos: 3, slot: 4, proj: 14, status: "OUT", weeks: { 1: 10, 2: 12, 3: 9 }, pace: 12 }]));
+  const s = r.suggestions.find((x) => x.type === "lineup");
+  assert.deepEqual(s.sit.form.weeks.map((w) => w.pts), [10, 12, 9]);
+  assert.equal(s.sit.form.games, 3);
+});
+test("history saved by the backend is used when ESPN's own data lacks the weeks", () => {
+  const cold = { name: "RB1", pos: 2, slot: 2, proj: 14, pace: 14 }; // no weekly stats on the player itself
+  const steady = { name: "BenchRB", pos: 2, slot: 20, proj: 11.5, pace: 11 };
+  const ids = {};
+  const team = baseTeam([cold, steady, { name: "FLEX1", pos: 3, slot: 23, proj: 12 }, { name: "FLEX2", pos: 2, slot: 23, proj: 12 }]);
+  team.roster.entries.forEach((e) => { ids[e.playerPoolEntry.player.fullName] = e.playerPoolEntry.player.id; });
+  const history = (id) => (id === ids.RB1 ? { a: { 1: 2, 2: 2, 3: 2 } } : id === ids.BenchRB ? { a: { 1: 12, 2: 12, 3: 12 } } : null);
+  const r = run(team, [], { history });
+  assert.ok(r.suggestions.some((x) => x.type === "lineup" && x.sit && x.sit.name === "RB1"));
+});
+
+/* ---- win-driven decisions ---- */
+// An opponent whose starters total roughly `total` points.
+const oppTeam = (total) => ({ name: "Opponent", roster: { entries: [
+  { name: "O-QB", pos: 1, slot: 0 }, { name: "O-RB1", pos: 2, slot: 2 }, { name: "O-RB2", pos: 2, slot: 2 }, { name: "O-WR1", pos: 3, slot: 4 }, { name: "O-WR2", pos: 3, slot: 4 },
+  { name: "O-TE", pos: 4, slot: 6 }, { name: "O-F1", pos: 3, slot: 23 }, { name: "O-F2", pos: 2, slot: 23 }, { name: "O-DST", pos: 16, slot: 16 },
+].map((p) => rosterEntry({ ...p, proj: total / 9 })) } });
+
+test("with an opponent, results include win probability, and fixes never lower it", () => {
+  const r = run(baseTeam([{ name: "WR1", pos: 3, slot: 4, proj: 14, status: "OUT" }]), [{ name: "FA", pos: 3, proj: 17 }], { opponent: { team: oppTeam(110) } });
+  assert.ok(r.summary.win && r.summary.opponent.name === "Opponent");
+  assert.ok(r.summary.win.current <= r.summary.win.afterLineupFixes + 1 && r.summary.win.afterLineupFixes <= r.summary.win.afterPickups + 1);
+  r.suggestions.filter((x) => x.type !== "ir").forEach((x) => assert.ok(typeof x.winDelta === "number"));
+  assert.ok(r.suggestions.find((x) => x.type === "lineup").winDelta > 0);
+});
+test("without an opponent, win probability is simply absent (no crash, no NaN)", () => {
+  const r = run(baseTeam([{ name: "WR1", pos: 3, slot: 4, proj: 14, status: "OUT" }]));
+  assert.equal(r.summary.win, null);
+  assert.ok(r.suggestions.every((x) => x.winDelta == null));
+});
+test("an underdog takes the high-ceiling player, a favorite takes the safe floor", () => {
+  // Two bench WRs with almost the same expected points; one is boom-or-bust, one is steady.
+  const boom = { name: "Boom", pos: 3, slot: 20, proj: 10, weeks: { 1: 1, 2: 28, 3: 1 }, pace: 10 };
+  const safe = { name: "Safe", pos: 3, slot: 20, proj: 10.3, weeks: { 1: 10, 2: 10.5, 3: 10 }, pace: 10.3 };
+  const benchOnly = [{ name: "BenchWR", pos: 3, slot: 20, proj: 2 }, { name: "BenchRB", pos: 2, slot: 20, proj: 2 }];
+  const weakFlex = [{ name: "FLEX1", pos: 3, slot: 23, proj: 6 }, { name: "FLEX2", pos: 2, slot: 23, proj: 6 }];
+  const mk = () => baseTeam([boom, safe, ...benchOnly, ...weakFlex]);
+  const underdog = run(mk(), [], { opponent: { team: oppTeam(170) } }); // opponent far stronger
+  const favorite = run(mk(), [], { opponent: { team: oppTeam(70) } }); // opponent far weaker
+  const started = (r) => r.suggestions.filter((x) => x.type === "lineup").flatMap((x) => (x.start ? [x.start.name] : x.moves ? x.moves.map((m) => m.start.name) : []));
+  assert.ok(started(underdog).includes("Boom"), `underdog should start Boom: ${started(underdog)}`);
+  assert.ok(started(favorite).includes("Safe") && !started(favorite).includes("Boom"), `favorite should start Safe: ${started(favorite)}`);
+});
+test("hot free agents who don't change your lineup yet show up in a 'rising' list", () => {
+  const r = run(baseTeam(), [{ name: "Riser", pos: 3, proj: 5, weeks: { 1: 15, 2: 16, 3: 14 }, pace: 4 }, { name: "Plain", pos: 3, proj: 5 }]);
+  assert.ok(r.rising.some((x) => x.name === "Riser") && !r.rising.some((x) => x.name === "Plain"));
+});
+test("'rising' only lists free agents close to cracking this team's lineup", () => {
+  const r = run(baseTeam(), [
+    { name: "Close", pos: 3, proj: 7, weeks: { 1: 14, 2: 15, 3: 14 }, pace: 5 }, // hot, expected ~9-10 vs weakest starter 9
+    { name: "FarOff", pos: 3, proj: 2, weeks: { 1: 6, 2: 7, 3: 6 }, pace: 1 }, // hot but nowhere near a starting spot
+  ]);
+  assert.ok(r.rising.some((x) => x.name === "Close") || r.suggestions.some((x) => x.add && x.add.name === "Close"));
+  assert.ok(!r.rising.some((x) => x.name === "FarOff"));
+});
+test("team names are trimmed (ESPN names often carry stray spaces)", () => {
+  const team = baseTeam();
+  team.name = "  Padded Name  ";
+  const opp = oppTeam(110);
+  opp.name = " Opp Padded ";
+  const r = run(team, [], { opponent: { team: opp } });
+  assert.equal(r.teamName, "Padded Name");
+  assert.equal(r.summary.opponent.name, "Opp Padded");
+});
+
+/* ---- randomized stress test: with real-looking weekly history and opponents ---- */
+test("200 random rosters with weekly history and opponents: every rule and number holds", () => {
+  let seed = 987;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const pick = (a) => a[Math.floor(rnd() * a.length)];
+  const STATUS = [undefined, undefined, undefined, "QUESTIONABLE", "DAY_TO_DAY", "DOUBTFUL", "OUT", "INJURY_RESERVE"];
+  const hist = (proj) => (rnd() < 0.8 ? Object.fromEntries([1, 2, 3].filter(() => rnd() < 0.9).map((w) => [w, Math.round(Math.max(0, proj * (0.3 + rnd() * 1.6)) * 10) / 10])) : null);
+  for (let iter = 0; iter < 200; iter++) {
+    const plan = [[0, 1], [2, 2], [4, 2], [6, 1], [23, 2], [16, 1]];
+    let id = 0;
+    const mkTeam = (prefix) => {
+      const players = [];
+      plan.forEach(([slot, n]) => { for (let i = 0; i < n; i++) { const pos = slot === 0 ? 1 : slot === 2 ? 2 : slot === 4 ? 3 : slot === 6 ? 4 : slot === 16 ? 16 : pick([2, 3, 4]); const proj = Math.round(rnd() * 22); players.push({ name: `${prefix}${id++}`, pos, slot, proj, status: pick(STATUS), team: 1 + Math.floor(rnd() * 8), weeks: hist(proj), pace: proj * (0.7 + rnd() * 0.6) }); } });
+      for (let i = 0; i < 5; i++) { const proj = Math.round(rnd() * 16); players.push({ name: `${prefix}${id++}`, pos: pick([1, 2, 3, 3, 4]), slot: 20, proj, status: pick(STATUS), team: 1 + Math.floor(rnd() * 8), weeks: hist(proj), pace: proj }); }
+      return { name: prefix, roster: { entries: players.map(rosterEntry) } };
+    };
+    const team = mkTeam("T");
+    const opponent = rnd() < 0.85 ? { team: mkTeam("O") } : null;
+    const fas = Array.from({ length: 30 }, (_, i) => { const proj = Math.round(rnd() * 22); return { name: `F${i}`, pos: pick([1, 2, 3, 3, 4, 5, 16]), proj, status: pick(STATUS), team: 1 + Math.floor(rnd() * 8), weeks: hist(proj), pace: proj * (0.7 + rnd() * 0.6) }; });
+    const gs = { ...allPre };
+    Object.keys(gs).forEach((k) => { const r = rnd(); if (r < 0.15) gs[k] = "in"; else if (r < 0.25) gs[k] = "post"; else if (r < 0.32) delete gs[k]; });
+    const r = run(team, fas, { gameStateByTeam: gs, opponent });
+    const tag = `iter ${iter}`;
+    const names = new Set(team.roster.entries.map((e) => e.playerPoolEntry.player.fullName));
+    let pickupGain = 0;
+    r.suggestions.forEach((s) => {
+      assert.ok(Number.isFinite(s.gain) && s.gain >= 0, `${tag}: bad gain ${s.gain}`);
+      if (s.winDelta != null) assert.ok(Number.isFinite(s.winDelta) && Math.abs(s.winDelta) <= 100, `${tag}: bad winDelta ${s.winDelta}`);
+      if (s.type === "pickup") {
+        pickupGain += s.gain;
+        assert.ok(!names.has(s.add.name), `${tag}: suggested a rostered player`);
+        assert.ok(s.add.pos !== "K", `${tag}: kicker`);
+        assert.ok(s.gain >= 1, `${tag}: pickup below 1 point`);
+        assert.ok(Number.isFinite(s.add.exp) && s.add.exp >= 0, `${tag}: bad expected points`);
+        if (s.add.form) assert.ok(Math.abs(s.add.form.adj) <= Math.max(8, 0.4 * s.add.proj) + 1e-6, `${tag}: adjustment over cap`);
+      }
+    });
+    if (r.summary) {
+      assert.ok(r.summary.current <= r.summary.afterLineupFixes + 0.11 && r.summary.afterLineupFixes <= r.summary.afterPickups + 0.11, `${tag}: points went down`);
+      assert.ok(Math.abs(r.summary.afterPickups - r.summary.afterLineupFixes - pickupGain) < 0.6, `${tag}: pickup gains don't add up`);
+      if (r.summary.win) {
+        const w = r.summary.win;
+        [w.current, w.afterLineupFixes, w.afterPickups].forEach((x) => assert.ok(x >= 0 && x <= 100, `${tag}: win% out of range ${x}`));
+        assert.ok(w.afterLineupFixes >= w.current - 2 && w.afterPickups >= w.afterLineupFixes - 2, `${tag}: win% dropped (${w.current} -> ${w.afterLineupFixes} -> ${w.afterPickups})`);
+      }
+    }
+  }
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
