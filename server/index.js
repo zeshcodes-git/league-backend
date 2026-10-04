@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard } from "./espnClient.js";
 import { shouldRefreshNow, rosterCacheMs } from "./refreshPolicy.js";
+import { buildSuggestions, DEFAULT_RULES } from "./suggestions.js";
 import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames } from "./normalize.js";
 
 const app = express();
@@ -191,19 +192,34 @@ async function getNflScoreboard(week, seasonYear) {
 
 // League structure (regular-season length, playoff size) never changes
 // mid-season, so it's fetched once and kept — used for playoff odds.
-let cachedLeagueInfo = null;
-async function getLeagueInfo() {
-  if (cachedLeagueInfo) return cachedLeagueInfo;
+let cachedLeagueFull = null;
+async function getLeagueFull() {
+  if (cachedLeagueFull) return cachedLeagueFull;
   try {
     const raw = await fetchLeague(["mSettings"]);
     const sched = raw.settings?.scheduleSettings || {};
+    const rs = raw.settings?.rosterSettings || {};
     if (sched.matchupPeriodCount && sched.playoffTeamCount) {
-      cachedLeagueInfo = { regularSeasonWeeks: sched.matchupPeriodCount, playoffTeams: sched.playoffTeamCount };
+      cachedLeagueFull = {
+        regularSeasonWeeks: sched.matchupPeriodCount,
+        playoffTeams: sched.playoffTeamCount,
+        // Roster rules the lineup advisor needs: starting slots, bench/IR size, position limits.
+        rules: {
+          lineupSlotCounts: rs.lineupSlotCounts || DEFAULT_RULES.lineupSlotCounts,
+          positionLimits: rs.positionLimits || {},
+          isBenchUnlimited: Boolean(rs.isBenchUnlimited),
+        },
+      };
     }
   } catch (err) {
     console.warn("[league settings] failed:", err.message);
   }
-  return cachedLeagueInfo;
+  return cachedLeagueFull;
+}
+// The dashboard only needs the two season-structure numbers.
+async function getLeagueInfo() {
+  const full = await getLeagueFull();
+  return full ? { regularSeasonWeeks: full.regularSeasonWeeks, playoffTeams: full.playoffTeams } : null;
 }
 
 // Does the actual work: fetches fresh data from ESPN, figures out which
@@ -401,7 +417,6 @@ async function refreshDashboard() {
     lastCompletedWeek: lastCompletedWeekForResponse,
     league: await getLeagueInfo(),
     season: Number(process.env.ESPN_SEASON) || null,
-    myTeamEspnId: Number(process.env.MY_TEAM_ESPN_ID) || 9,
     // Set once ESPN assigns final ranks (season over) so the site can add the new champion by itself.
     champion: (() => { const t = (teamsRaw.teams || []).find((x) => x.rankFinal === 1); return t ? { season: Number(process.env.ESPN_SEASON) || null, espnTeamId: t.id } : null; })(),
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
@@ -467,129 +482,62 @@ async function getFreeAgentsRaw() {
 app.get("/api/free-agents", async (req, res) => {
   try {
     const raw = await getFreeAgentsRaw();
-    const currentWeek = latestDashboard ? latestDashboard.liveWeek : null;
+    // liveWeek only exists during the Mon-Wed hold; otherwise it's the dashboard's current week.
+    const currentWeek = latestDashboard ? latestDashboard.liveWeek || latestDashboard.currentWeek : null;
     res.json({ players: normalizeFreeAgents(raw, currentWeek) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Our own reasonable cutoff for "worth making a move" — a free agent has
-// to project meaningfully higher than what you'd drop, not just marginally
-// better, or this would suggest constant tiny, not-worth-it swaps.
-const WAIVER_IMPROVEMENT_THRESHOLD = 3;
-
-function bestFreeAgentAt(pos, freeAgents, excludeIds) {
-  return [...freeAgents]
-    .filter((f) => f.pos === pos && f.proj != null && !excludeIds.has(f.id))
-    .sort((a, b) => b.proj - a.proj)[0];
-}
-
-// A transparent, rules-based recommendation engine — NOT a live LLM call.
-// It compares your roster's real weekly projections against available free
-// agents, and flags byes/injuries first, then meaningful upgrades. Every
-// suggestion says exactly why, so it's easy to sanity-check by eye.
-const FLEX_ELIGIBLE_POSITIONS = new Set(["RB", "WR", "TE"]);
-
-function computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek) {
-  const suggestions = [];
-  const flaggedPlayerIds = new Set();
-  const usedFreeAgentIds = new Set();
-
-  const starters = roster.filter((p) => p.starter);
-  const bench = roster.filter((p) => !p.starter);
-  const flexStarter = starters.find((p) => p.slot === "FLEX");
-
-  // Priority 1: a STARTER who's on a bye or clearly not playing this week —
-  // this is the most urgent kind of move, since that roster spot is
-  // guaranteed to score 0 otherwise.
-  starters.forEach((p) => {
-    const onBye = !teamsPlayingThisWeek.has(p.nflTeam);
-    const isOut = /^(out|ir\b|injury[_ ]?reserve|doubtful|suspended|pup|nfi)/i.test(p.status || "");
-    if (!onBye && !isOut) return;
-    const best = bestFreeAgentAt(p.pos, freeAgents, usedFreeAgentIds);
-    if (!best) return;
-    flaggedPlayerIds.add(p.id);
-    usedFreeAgentIds.add(best.id);
-    const slotNote = p.slot === "FLEX" ? " (your FLEX spot)" : "";
-    suggestions.push({
-      priority: "high",
-      dropName: p.name,
-      dropPos: p.pos,
-      dropReason: onBye ? "on a bye this week" : `listed as ${p.status}`,
-      addName: best.name,
-      addPos: best.pos,
-      addProj: best.proj,
-      reason: `${p.name} is ${onBye ? "on a bye this week" : `listed as ${p.status}`}${slotNote} — ${best.name} is a healthy, available ${best.pos} projected for ${best.proj.toFixed(1)} points this week.`,
-    });
-  });
-
-  // For each position, find the single WEAKEST roster spot that a free
-  // agent there could actually take over. For RB/WR/TE this deliberately
-  // includes your FLEX starter and dedicated starter at that position, not
-  // just same-position bench players — a strong pickup might be better
-  // used bumping a weak FLEX starter than sitting on the bench.
-  function weakestCandidateFor(pos) {
-    const candidates = bench.filter((p) => p.pos === pos && !flaggedPlayerIds.has(p.id));
-    const dedicatedStarter = starters.find((p) => p.slot === pos && !flaggedPlayerIds.has(p.id));
-    if (dedicatedStarter) candidates.push(dedicatedStarter);
-    if (FLEX_ELIGIBLE_POSITIONS.has(pos) && flexStarter && !flaggedPlayerIds.has(flexStarter.id)) {
-      candidates.push(flexStarter);
-    }
-    const seen = new Set();
-    const deduped = candidates.filter((c) => (seen.has(c.id) ? false : (seen.add(c.id), true)));
-    if (deduped.length === 0) return null;
-    return deduped.sort((a, b) => a.proj - b.proj)[0];
+// Lineup & pickup advice for ANY team (see suggestions.js for the rules).
+// Injury news changes fast, so this refreshes the roster data if it's more than
+// 10 minutes old — but only when someone actually opens the page, and at most
+// once per 10 minutes no matter how many people do.
+const ADVICE_ROSTER_MAX_AGE_MS = 10 * 60 * 1000;
+async function getRosterForAdvice() {
+  if (!cachedRosterRaw || Date.now() - playerStatsCachedAt > ADVICE_ROSTER_MAX_AGE_MS) {
+    playerStatsCachedAt = 0; // force refreshPlayerStatsIfStale to refetch
+    await refreshPlayerStatsIfStale();
   }
-
-  ["QB", "RB", "WR", "TE", "K", "DST"].forEach((pos) => {
-    const weakest = weakestCandidateFor(pos);
-    if (!weakest) return;
-    const best = bestFreeAgentAt(pos, freeAgents, usedFreeAgentIds);
-    if (!best) return;
-    const gap = best.proj - weakest.proj;
-    if (gap < WAIVER_IMPROVEMENT_THRESHOLD) return;
-    flaggedPlayerIds.add(weakest.id);
-    usedFreeAgentIds.add(best.id);
-    const slotNote = weakest.slot === "FLEX" ? " in your FLEX spot" : "";
-    suggestions.push({
-      priority: weakest.starter ? "medium" : "low",
-      dropName: weakest.name,
-      dropPos: weakest.pos,
-      dropReason: `projected for just ${weakest.proj.toFixed(1)} points${slotNote}`,
-      addName: best.name,
-      addPos: best.pos,
-      addProj: best.proj,
-      reason: `${best.name} is projected for ${best.proj.toFixed(1)} points at ${best.pos} — about ${gap.toFixed(1)} more than ${weakest.name}'s ${weakest.proj.toFixed(1)}${slotNote}.`,
-    });
-  });
-
-  const order = { high: 0, medium: 1, low: 2 };
-  return suggestions.sort((a, b) => order[a.priority] - order[b.priority]);
+  return cachedRosterRaw || (await fetchLeague(["mRoster", "mTeam"]));
 }
 
-// This is a personal feature for one specific team in the league (per an
-// explicit request), not a general-purpose endpoint — hence the hardcoded
-// ESPN team id rather than a :espnTeamId route param.
-// Which team the "Pickup Suggestions" page is for. Set MY_TEAM_ESPN_ID in the
-// environment to change it without touching code (defaults to team 9).
-const MY_TEAM_ESPN_ID = Number(process.env.MY_TEAM_ESPN_ID) || 9;
+async function suggestionsForTeam(espnTeamId) {
+  const rosterRaw = await getRosterForAdvice();
+  const team = rosterRaw.teams.find((t) => t.id === espnTeamId);
+  if (!team) return null;
+  const [freeAgentsRaw, league] = await Promise.all([getFreeAgentsRaw(), getLeagueFull()]);
+  // The same NFL game-state lookup the dashboard uses (cached for a minute).
+  if (!cachedGameStateByTeam || Object.keys(cachedGameStateByTeam).length === 0) await getNflScoreboard(rosterRaw.scoringPeriodId, process.env.ESPN_SEASON).catch(() => null);
+  const list = Array.isArray(freeAgentsRaw) ? freeAgentsRaw : freeAgentsRaw.players || [];
+  const unrostered = list.filter((e) => !e.onTeamId || e.onTeamId <= 0);
+  return buildSuggestions({
+    team,
+    freeAgents: unrostered,
+    week: rosterRaw.scoringPeriodId,
+    gameStateByTeam: cachedGameStateByTeam || {},
+    rules: league ? league.rules : DEFAULT_RULES,
+  });
+}
 
+app.get("/api/team/:espnTeamId/suggestions", async (req, res) => {
+  try {
+    const out = await suggestionsForTeam(Number(req.params.espnTeamId));
+    if (!out) return res.status(404).json({ error: "No team with that ESPN team id" });
+    res.json(out);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Older versions of the site asked for one fixed team; keep that working.
+const MY_TEAM_ESPN_ID = Number(process.env.MY_TEAM_ESPN_ID) || 9;
 app.get("/api/my-team-suggestions", async (req, res) => {
   try {
-    const rosterRaw = cachedRosterRaw || (await fetchLeague(["mRoster", "mTeam"]));
-    const currentWeek = rosterRaw.scoringPeriodId;
-    const myTeamRaw = rosterRaw.teams.find((t) => t.id === MY_TEAM_ESPN_ID);
-    if (!myTeamRaw) return res.status(404).json({ error: "Couldn't find that team." });
-
-    const [freeAgentsRaw, nflRaw] = await Promise.all([getFreeAgentsRaw(), getNflScoreboard()]);
-    const roster = normalizeRoster(myTeamRaw, currentWeek, cachedGameStateByTeam);
-    const freeAgents = normalizeFreeAgents(freeAgentsRaw, currentWeek);
-    const nflGames = normalizeNflGames(nflRaw);
-    const teamsPlayingThisWeek = new Set(nflGames.flatMap((g) => [g.home.abbrev, g.away.abbrev]));
-
-    const suggestions = computeWaiverSuggestions(roster, freeAgents, teamsPlayingThisWeek);
-    res.json({ teamName: myTeamRaw.name, currentWeek, suggestions });
+    const out = await suggestionsForTeam(MY_TEAM_ESPN_ID);
+    if (!out) return res.status(404).json({ error: "Couldn't find that team." });
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

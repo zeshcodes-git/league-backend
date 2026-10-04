@@ -3,7 +3,7 @@
 // in the app works with the simple, clean shape produced here — the
 // same shape our original mock data used.
 
-const PRO_TEAM_ABBREV = {
+export const PRO_TEAM_ABBREV = {
   0: "FA", 1: "ATL", 2: "BUF", 3: "CHI", 4: "CIN", 5: "CLE", 6: "DAL",
   7: "DEN", 8: "DET", 9: "GB", 10: "TEN", 11: "IND", 12: "KC", 13: "LV",
   14: "LAR", 15: "MIA", 16: "MIN", 17: "NE", 18: "NO", 19: "NYG", 20: "NYJ",
@@ -76,7 +76,7 @@ export function normalizeTeams(rawTeamsData) {
 // A player's stats array holds many entries (past weeks, season totals,
 // actual AND projected). We need the ONE entry that's specifically this
 // week's pregame projection, not just any statSourceId:1 entry.
-function projectedTotal(stats, currentWeek, fallback) {
+export function projectedTotal(stats, currentWeek, fallback) {
   const entry = (stats || []).find((s) => s.statSourceId === 1 && s.scoringPeriodId === currentWeek);
   return entry ? entry.appliedTotal : fallback;
 }
@@ -86,7 +86,7 @@ function projectedTotal(stats, currentWeek, fallback) {
 // than just the requested week — so for "this week's actual points" we
 // pull the specific week's actual entry directly instead, the same
 // reliable way projectedTotal above does for projections.
-function actualTotal(stats, currentWeek) {
+export function actualTotal(stats, currentWeek) {
   const entry = (stats || []).find((s) => s.statSourceId === 0 && s.scoringPeriodId === currentWeek);
   return entry ? entry.appliedTotal : 0;
 }
