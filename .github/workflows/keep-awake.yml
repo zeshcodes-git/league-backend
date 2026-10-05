@@ -1,12 +1,15 @@
-# Render's free tier puts the server to sleep after ~15 minutes with no
-# traffic, and a sleeping server can't record Kalshi Odds history. This pings
-# the lightweight /api/health endpoint (no ESPN call, tiny response) every
-# 5 minutes so the odds chart starts the moment each week's matchups are set.
+# Render's free tier puts the server to sleep after ~15 minutes with no traffic.
+# This job pings the lightweight /api/health endpoint so the server stays awake.
+#
+# It is PAUSED for now (the schedule is commented out) because the backend is
+# running with REFRESH_MODE=off, so there is nothing to keep awake for.
+# To turn it back on for game days, set REFRESH_MODE=auto on Render and
+# uncomment the schedule below.
 name: Keep backend awake
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
+  # schedule:
+  #   - cron: "*/10 * * * *"
   workflow_dispatch:
 
 jobs:

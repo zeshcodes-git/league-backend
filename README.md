@@ -116,6 +116,27 @@ Once you can see real data at those URLs, the next step is teaching the
 website to fetch from this server instead of using its built-in mock data.
 We'll do that page by page, the same way we built the mock version.
 
+## Bandwidth: staying inside Render's free allowance
+
+The backend can pull a lot from ESPN (about 120 KB compressed per refresh, plus a
+500 KB roster download), so how often it does that is controlled by one setting
+on Render — **`REFRESH_MODE`** (Environment tab, no code change needed):
+
+| Mode | What it does | Rough monthly traffic |
+| --- | --- | --- |
+| `off` (default) | Never pulls from ESPN on a schedule. The site shows the last saved data (kept in Upstash, so even restarts cost nothing). The site shows a "paused" notice. | about 0 |
+| `lowpower` | No timer. A visit may trigger one refresh if the data is over 15 minutes old. | low |
+| `auto` | Live mode: every 2 minutes while NFL games are on (or within 20 minutes of kickoff), hourly otherwise. Rosters every 30 min live / 6 h otherwise. | roughly 1 GB |
+
+**To go live for a game day:** set `REFRESH_MODE=auto`, save (Render restarts the
+server), and re-enable the schedule in `.github/workflows/keep-awake.yml` if you
+want the odds chart to record while nobody is on the site. Set it back to `off`
+afterwards. `/api/health` shows the current mode and how old the data is.
+
+What else keeps traffic small: responses are cached by browsers, the odds history is
+saved by appending one tiny entry per change (not re-uploading the whole list),
+and the site stops refreshing when a tab is hidden or idle.
+
 ## Optional settings and housekeeping
 
 These go in your `.env` locally and in the environment variables on Render.

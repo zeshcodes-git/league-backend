@@ -3,7 +3,8 @@ import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard, fetchPlayersWeekly } from "./espnClient.js";
 import { createPlayerHistory } from "./playerHistory.js";
-import { shouldRefreshNow, rosterCacheMs } from "./refreshPolicy.js";
+import { getMode, shouldRefreshNow, shouldRefreshOnVisit, rosterCacheMs, CACHE_MS, clientCacheSeconds } from "./refreshPolicy.js";
+import { createKv } from "./kv.js";
 import { buildSuggestions, DEFAULT_RULES } from "./suggestions.js";
 import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames, PRO_TEAM_ABBREV, projectedTotal } from "./normalize.js";
 
@@ -21,35 +22,21 @@ app.use(cors());
 // configured, these just quietly do nothing rather than break the app.
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const kv = createKv({ url: UPSTASH_URL, token: UPSTASH_TOKEN });
+const kvGet = (key) => kv.get(key);
+const kvSet = (key, value) => kv.set(key, value);
 
-async function kvGet(key) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
-  try {
-    const res = await fetch(UPSTASH_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(["GET", key]),
-    });
-    const data = await res.json();
-    return data.result ? JSON.parse(data.result) : null;
-  } catch (err) {
-    console.warn("[kvGet] failed:", err.message);
-    return null;
-  }
-}
+// How aggressively this server may call ESPN. Set REFRESH_MODE on Render to
+// "off" (default), "lowpower" or "auto" — see refreshPolicy.js. No code change needed.
+const MODE = getMode(process.env.REFRESH_MODE);
+console.log(`[refresh mode] ${MODE}`);
 
-async function kvSet(key, value) {
-  if (!UPSTASH_URL || !UPSTASH_TOKEN) return;
-  try {
-    await fetch(UPSTASH_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${UPSTASH_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(["SET", key, JSON.stringify(value)]),
-    });
-  } catch (err) {
-    console.warn("[kvSet] failed:", err.message);
-  }
-}
+// Let browsers reuse responses for a while instead of asking again.
+app.use("/api", (req, res, next) => {
+  const secs = clientCacheSeconds(`/api${req.path}`, MODE);
+  res.setHeader("Cache-Control", secs > 0 ? `public, max-age=${secs}` : "no-store");
+  next();
+});
 
 // Quick sanity check — hit this first to confirm the server itself is running,
 // with no ESPN call involved yet.
@@ -67,6 +54,7 @@ app.get("/api/health", (req, res) => {
       lastSnapshotAt: oddsSnapshots.length ? new Date(oddsSnapshots[oddsSnapshots.length - 1].time).toISOString() : null,
     },
     playerHistory: playerHistory.stats(),
+    refresh: { mode: MODE, lastRefreshAt: lastRefreshAt ? new Date(lastRefreshAt).toISOString() : null, ageMinutes: lastRefreshAt ? Math.round((Date.now() - lastRefreshAt) / 60000) : null },
     uptimeMinutes: Math.round(process.uptime() / 60),
   });
 });
@@ -88,12 +76,37 @@ function compactSnapshots(list) {
   const same = (a, b) => a.week === b.week && a.matchups.length === b.matchups.length && a.matchups.every((m, i) => b.matchups[i] && b.matchups[i].id === m.id && b.matchups[i].winProbA === m.winProbA);
   return list.filter((snap, i) => i === 0 || i === list.length - 1 || !same(snap, list[i - 1]) || !same(snap, list[i + 1]));
 }
-let oddsSnapshots = compactSnapshots((await kvGet("oddsSnapshots")) || []);
+// The odds log lives in Upstash as a list we only ever APPEND to (one small
+// entry per change). Older versions stored the whole array under one key — if
+// the list is empty we migrate that once.
+let oddsSnapshots = await kv.lrange("oddsLog");
+if (oddsSnapshots.length === 0) {
+  const legacy = compactSnapshots((await kvGet("oddsSnapshots")) || []);
+  if (legacy.length) {
+    oddsSnapshots = legacy;
+    await kv.replaceList("oddsLog", legacy);
+    console.log(`[odds] migrated ${legacy.length} snapshots to the append-only log`);
+  }
+} else {
+  const compact = compactSnapshots(oddsSnapshots);
+  if (compact.length !== oddsSnapshots.length) {
+    oddsSnapshots = compact;
+    await kv.replaceList("oddsLog", compact); // one-time tidy of old per-minute entries
+  }
+}
+let oddsPushesSinceTrim = 0;
 
 // Cache of the last successfully computed dashboard, so /api/dashboard can
 // respond instantly from whatever the background timer last captured,
 // instead of every page load triggering its own ESPN calls.
 let latestDashboard = null;
+// Also saved in Upstash, so a restart or wake-up can serve the last data right away
+// instead of downloading it from ESPN again.
+{
+  const saved = await kvGet("dashboardCache");
+  if (saved && saved.data) { latestDashboard = saved.data; }
+  var savedDashboardAt = saved && saved.at ? saved.at : 0; // when that data was captured
+}
 // Cached separately so the standalone roster endpoint (which runs outside
 // the main refresh cycle) can mark which players have already started
 // their real NFL game.
@@ -153,14 +166,14 @@ function isPastWednesdayNoonPacific() {
 // much slower cadence instead of every time the live-score cycle runs.
 // What the last NFL schedule lookup said: is a game live, and when is the next kickoff?
 let liveInfo = null; // { anyLive, nextKickoffMs }
-let lastRefreshAt = 0;
+let lastRefreshAt = savedDashboardAt; // when the data we are serving was captured
 let cachedPlayerStatsById = {};
 let playerStatsCachedAt = 0;
 // Reused for 10 minutes while games are live, an hour otherwise (see refreshPolicy.js).
 
 async function refreshPlayerStatsIfStale() {
   const now = Date.now();
-  if (cachedRosterRaw && now - playerStatsCachedAt < rosterCacheMs(liveInfo)) return;
+  if (cachedRosterRaw && now - playerStatsCachedAt < rosterCacheMs(liveInfo, MODE)) return;
   try {
     const rosterRaw = await fetchLeague(["mRoster", "mTeam"]);
     cachedRosterRaw = rosterRaw;
@@ -185,12 +198,12 @@ async function refreshPlayerStatsIfStale() {
 // refresh cycle, waiver suggestions, and the NFL Scores page) — shared
 // here with a short cache instead of each independently re-fetching it.
 let cachedNflByKey = {};
-const NFL_CACHE_MS = 60 * 1000;
+const nflCacheMs = () => CACHE_MS.nflScoreboard[MODE];
 
 async function getNflScoreboard(week, seasonYear) {
   const key = `${week || "default"}-${seasonYear || "default"}`;
   const cached = cachedNflByKey[key];
-  if (cached && Date.now() - cached.at < NFL_CACHE_MS) return cached.data;
+  if (cached && Date.now() - cached.at < nflCacheMs()) return cached.data;
   const data = await fetchNflScoreboard(week, seasonYear);
   cachedNflByKey[key] = { data, at: Date.now() };
   return data;
@@ -363,10 +376,19 @@ async function refreshDashboard() {
       week: currentWeek,
       matchups: matchups.map((m) => ({ id: m.id, winProbA: m.winProbA })),
     });
+    // Append just the new entry to storage (a few hundred bytes), not the whole list.
+    const snap = oddsSnapshots[oddsSnapshots.length - 1];
+    await kv.rpush("oddsLog", snap);
     // Keep the current and previous week only; the cap is just a safety net.
-    oddsSnapshots = oddsSnapshots.filter((x) => x.week >= currentWeek - 1);
-    if (oddsSnapshots.length > 3500) oddsSnapshots = oddsSnapshots.slice(-3500);
-    await kvSet("oddsSnapshots", oddsSnapshots);
+    const kept = oddsSnapshots.filter((x) => x.week >= currentWeek - 1);
+    if (kept.length !== oddsSnapshots.length) {
+      oddsSnapshots = kept;
+      await kv.replaceList("oddsLog", kept); // happens about once a week
+    } else if (++oddsPushesSinceTrim >= 200) {
+      oddsPushesSinceTrim = 0;
+      if (oddsSnapshots.length > 3500) oddsSnapshots = oddsSnapshots.slice(-3500);
+      await kv.keepLast("oddsLog", 3500);
+    }
   }
 
   if (weekComplete && (!lastCompletedWeekSnapshot || lastCompletedWeekSnapshot.week !== currentWeek)) {
@@ -427,6 +449,8 @@ async function refreshDashboard() {
     champion: (() => { const t = (teamsRaw.teams || []).find((x) => x.rankFinal === 1); return t ? { season: Number(process.env.ESPN_SEASON) || null, espnTeamId: t.id } : null; })(),
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
   };
+  lastRefreshAt = Date.now();
+  kvSet("dashboardCache", { at: lastRefreshAt, data: latestDashboard }).catch(() => {});
   return latestDashboard;
 }
 
@@ -439,22 +463,31 @@ async function refreshDashboard() {
 // the largest one) runs on its own much slower 10-minute cache instead of
 // every cycle, so this interval mainly just keeps live scores current.
 if (process.env.ESPN_LEAGUE_ID && process.env.ESPN_SEASON) {
-  refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
-  // Ticks every 30s but only calls ESPN when refreshPolicy says it's worth it.
-  setInterval(() => {
-    if (!shouldRefreshNow({ hasData: Boolean(latestDashboard), lastRefreshAt, info: liveInfo })) return;
-    refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
-  }, 30 * 1000);
+  // Only fetch at startup if we have nothing saved to show. (In "auto" mode the timer
+  // below keeps things fresh; in "off" and "lowpower" a restart costs no ESPN traffic.)
+  if (!latestDashboard || MODE === "auto") refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
+  if (MODE === "auto") {
+    // Ticks every 30s but only calls ESPN when refreshPolicy says it's worth it.
+    setInterval(() => {
+      if (!shouldRefreshNow({ hasData: Boolean(latestDashboard), lastRefreshAt, info: liveInfo, mode: MODE })) return;
+      refreshDashboard().catch((err) => console.warn("[background refresh] failed:", err.message));
+    }, 30 * 1000);
+  }
 }
 
 // Teams + this week's matchups, in the same shape the mock data used.
+let dashboardInFlight = null; // so many visitors at once cause only one ESPN refresh
 app.get("/api/dashboard", async (req, res) => {
   try {
-    // Serve the latest background-captured snapshot if we have one — keeps
-    // page loads fast and avoids hammering ESPN on every single visit.
-    if (latestDashboard) return res.json(latestDashboard);
-    const dashboard = await refreshDashboard();
-    res.json(dashboard);
+    if (shouldRefreshOnVisit({ hasData: Boolean(latestDashboard), lastRefreshAt, mode: MODE })) {
+      dashboardInFlight = dashboardInFlight || refreshDashboard().finally(() => { dashboardInFlight = null; });
+      await dashboardInFlight.catch((err) => {
+        if (!latestDashboard) throw err; // nothing to fall back on
+        console.warn("[on-visit refresh] failed, serving saved data:", err.message);
+      });
+    }
+    // `meta` tells the site how fresh this is, so it can say so honestly.
+    res.json({ ...latestDashboard, meta: { mode: MODE, updatedAt: lastRefreshAt || null } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -475,11 +508,11 @@ app.get("/api/team/:espnTeamId/roster", async (req, res) => {
 // Waiver-wire / free-agent players.
 let cachedFreeAgentsRaw = null;
 let freeAgentsCachedAt = 0;
-const FREE_AGENTS_CACHE_MS = 5 * 60 * 1000; // ownership % and outlooks don't change fast enough to justify fetching fresh every 30 seconds
+const freeAgentsCacheMs = () => CACHE_MS.freeAgents[MODE]; // ownership % and outlooks don't change fast enough to justify fetching fresh every 30 seconds
 
 async function getFreeAgentsRaw() {
   const now = Date.now();
-  if (cachedFreeAgentsRaw && now - freeAgentsCachedAt < FREE_AGENTS_CACHE_MS) return cachedFreeAgentsRaw;
+  if (cachedFreeAgentsRaw && now - freeAgentsCachedAt < freeAgentsCacheMs()) return cachedFreeAgentsRaw;
   cachedFreeAgentsRaw = await fetchFreeAgents();
   freeAgentsCachedAt = now;
   return cachedFreeAgentsRaw;
@@ -500,9 +533,9 @@ app.get("/api/free-agents", async (req, res) => {
 // Injury news changes fast, so this refreshes the roster data if it's more than
 // 10 minutes old — but only when someone actually opens the page, and at most
 // once per 10 minutes no matter how many people do.
-const ADVICE_ROSTER_MAX_AGE_MS = 10 * 60 * 1000;
+const adviceRosterMaxAgeMs = () => CACHE_MS.adviceRoster[MODE];
 async function getRosterForAdvice() {
-  if (!cachedRosterRaw || Date.now() - playerStatsCachedAt > ADVICE_ROSTER_MAX_AGE_MS) {
+  if (!cachedRosterRaw || Date.now() - playerStatsCachedAt > adviceRosterMaxAgeMs()) {
     playerStatsCachedAt = 0; // force refreshPlayerStatsIfStale to refetch
     await refreshPlayerStatsIfStale();
   }
