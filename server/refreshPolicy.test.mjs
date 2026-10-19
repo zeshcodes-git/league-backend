@@ -1,6 +1,6 @@
 // Run with:  node server/refreshPolicy.test.mjs
 import assert from "node:assert/strict";
-import { getMode, shouldRefreshNow, shouldRefreshOnVisit, isLiveWindow, rosterCacheMs, CACHE_MS, clientCacheSeconds, LIVE_REFRESH_MS, QUIET_REFRESH_MS } from "./refreshPolicy.js";
+import { isPostWeekHold, pacificParts, getMode, shouldRefreshNow, shouldRefreshOnVisit, isLiveWindow, rosterCacheMs, CACHE_MS, clientCacheSeconds, LIVE_REFRESH_MS, QUIET_REFRESH_MS } from "./refreshPolicy.js";
 
 let pass = 0, fail = 0;
 const test = (name, fn) => { try { fn(); pass++; console.log("PASS", name); } catch (e) { fail++; console.log("FAIL", name, "\n     ", e.message); } };
@@ -72,6 +72,39 @@ test("API responses are cacheable by the browser, longer when quieter", () => {
     assert.ok(a > 0 && a <= l && l <= o, `${p}: ${a}/${l}/${o}`);
   });
   assert.equal(clientCacheSeconds("/api/health", "off"), 0, "the health check must never be cached");
+});
+
+/* ---- the "last week's results" hold: only Tuesday through Wednesday noon (Pacific) ---- */
+// 2026-10-18 is a Sunday. Times below are Pacific (PDT = UTC-7 until Nov 1).
+const pt = (iso) => Date.parse(iso + "-07:00");
+test("Sunday and Monday (the new week's games) are NEVER held — this was the bug", () => {
+  assert.equal(isPostWeekHold(pt("2026-10-18T10:00:00")), false); // Sunday morning
+  assert.equal(isPostWeekHold(pt("2026-10-18T20:00:00")), false); // Sunday night
+  assert.equal(isPostWeekHold(pt("2026-10-19T11:57:00")), false); // Monday morning (when it was reported)
+  assert.equal(isPostWeekHold(pt("2026-10-19T22:30:00")), false); // Monday night football
+});
+test("Tuesday all day, and Wednesday until noon, ARE held", () => {
+  assert.equal(isPostWeekHold(pt("2026-10-20T00:30:00")), true);
+  assert.equal(isPostWeekHold(pt("2026-10-20T15:00:00")), true);
+  assert.equal(isPostWeekHold(pt("2026-10-21T09:00:00")), true);
+  assert.equal(isPostWeekHold(pt("2026-10-21T11:59:00")), true);
+});
+test("from Wednesday noon through Saturday the current week shows", () => {
+  assert.equal(isPostWeekHold(pt("2026-10-21T12:00:00")), false);
+  assert.equal(isPostWeekHold(pt("2026-10-21T18:00:00")), false);
+  assert.equal(isPostWeekHold(pt("2026-10-22T20:15:00")), false); // Thursday night kickoff
+  assert.equal(isPostWeekHold(pt("2026-10-24T12:00:00")), false); // Saturday
+});
+test("Pacific time is used regardless of server timezone, including after daylight saving ends", () => {
+  assert.deepEqual(pacificParts(Date.parse("2026-10-20T07:00:00Z")), { day: 2, hour: 0 }); // PDT
+  assert.deepEqual(pacificParts(Date.parse("2026-11-03T08:00:00Z")), { day: 2, hour: 0 }); // PST (after Nov 1)
+  assert.equal(isPostWeekHold(Date.parse("2026-11-04T19:59:00Z")), true); // Wed 11:59 PST
+  assert.equal(isPostWeekHold(Date.parse("2026-11-04T20:00:00Z")), false); // Wed 12:00 PST
+});
+test("every hour of every day gives a clean answer (only Tue + Wed AM are held)", () => {
+  let held = 0;
+  for (let h = 0; h < 24 * 7; h++) if (isPostWeekHold(pt("2026-10-18T00:00:00") + h * 3600000)) held++;
+  assert.equal(held, 24 + 12, "24 hours of Tuesday + 12 hours of Wednesday morning");
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

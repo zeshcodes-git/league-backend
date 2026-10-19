@@ -81,3 +81,26 @@ export function clientCacheSeconds(path, mode = "off") {
   if (/^\/api\/team\/\d+\/suggestions$/.test(path)) return { auto: 120, lowpower: 600, off: 1800 }[mode];
   return 0;
 }
+
+// ---- the "last week's results" hold ----
+//
+// After a week's games finish, ESPN moves to the next scoring period (early Tuesday).
+// For a short time we keep showing the week that just ended, so people can read how
+// it turned out: from Tuesday morning until Wednesday 12:00 noon Pacific.
+//
+// IMPORTANT: that window is ONLY Tuesday and Wednesday morning. The new week's games
+// run Thursday through Monday, so on Thursday-Monday we must show the CURRENT week.
+// (An earlier version also held on Sunday and Monday, which hid live games.)
+
+// Day of week (0 = Sunday) and hour (0-23) in Pacific time, daylight saving included.
+export function pacificParts(now = Date.now()) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", hour: "numeric", hourCycle: "h23" }).formatToParts(new Date(now));
+  const weekday = parts.find((p) => p.type === "weekday").value;
+  const hour = Number(parts.find((p) => p.type === "hour").value) % 24;
+  return { day: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(weekday), hour };
+}
+
+export function isPostWeekHold(now = Date.now()) {
+  const { day, hour } = pacificParts(now);
+  return day === 2 || (day === 3 && hour < 12);
+}

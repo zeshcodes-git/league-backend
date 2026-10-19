@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import { fetchLeague, fetchFreeAgents, fetchNflScoreboard, fetchPlayersWeekly } from "./espnClient.js";
 import { createPlayerHistory } from "./playerHistory.js";
-import { getMode, shouldRefreshNow, shouldRefreshOnVisit, rosterCacheMs, CACHE_MS, clientCacheSeconds } from "./refreshPolicy.js";
+import { getMode, isPostWeekHold, shouldRefreshNow, shouldRefreshOnVisit, rosterCacheMs, CACHE_MS, clientCacheSeconds } from "./refreshPolicy.js";
 import { createKv } from "./kv.js";
 import { buildSuggestions, DEFAULT_RULES } from "./suggestions.js";
 import { normalizeTeams, normalizeMatchups, buildCompletedWeeks, normalizeRoster, normalizeFreeAgents, normalizeNflGames, PRO_TEAM_ABBREV, projectedTotal } from "./normalize.js";
@@ -104,8 +104,9 @@ let latestDashboard = null;
 // instead of downloading it from ESPN again.
 {
   const saved = await kvGet("dashboardCache");
-  if (saved && saved.data) { latestDashboard = saved.data; }
-  var savedDashboardAt = saved && saved.at ? saved.at : 0; // when that data was captured
+  // v2: older saved copies could be showing last week by mistake, so they are not reused.
+  if (saved && saved.data && saved.v === 2) { latestDashboard = saved.data; }
+  var savedDashboardAt = saved && saved.v === 2 && saved.at ? saved.at : 0; // when that data was captured
 }
 // Cached separately so the standalone roster endpoint (which runs outside
 // the main refresh cycle) can mark which players have already started
@@ -143,19 +144,6 @@ const isBlankWeek = (w) => !w || !w.matchups || w.matchups.every((m) => !m.score
     await kvSet("lastCompletedWeek", null);
     console.warn("[startup] removed blank last-completed-week snapshot");
   }
-}
-
-// True once it's Wednesday 12pm Pacific or later (or any day after
-// Wednesday) — the traditional "waiver Wednesday" cutoff. Before that,
-// we keep showing last week's finished results instead of jumping ahead
-// to the new week the moment ESPN advances its own scoring period.
-function isPastWednesdayNoonPacific() {
-  const pacificNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const day = pacificNow.getDay(); // 0=Sun ... 3=Wed ... 6=Sat
-  const hour = pacificNow.getHours();
-  if (day > 3) return true;
-  if (day < 3) return false;
-  return hour >= 12;
 }
 
 // The mMatchup view doesn't include each player's full stats breakdown
@@ -409,7 +397,7 @@ async function refreshDashboard() {
   let displayTeams = teams;
   let displayMatchups = matchups;
   if (
-    !isPastWednesdayNoonPacific() &&
+    isPostWeekHold() &&
     lastCompletedWeekSnapshot &&
     lastCompletedWeekSnapshot.week === currentWeek - 1
   ) {
@@ -450,7 +438,7 @@ async function refreshDashboard() {
     ...(holdActive ? { liveWeek: currentWeek, liveMatchups: matchups } : {}),
   };
   lastRefreshAt = Date.now();
-  kvSet("dashboardCache", { at: lastRefreshAt, data: latestDashboard }).catch(() => {});
+  kvSet("dashboardCache", { v: 2, at: lastRefreshAt, data: latestDashboard }).catch(() => {});
   return latestDashboard;
 }
 
